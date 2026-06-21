@@ -7,7 +7,15 @@ Source documentation: https://devs.alerts.in.ua/
 
 ## Authentication
 
-Set the token in the environment:
+Set the token in a local `.env` file:
+
+```text
+ALERTS_IN_UA_TOKEN=your-token
+```
+
+The file is ignored by Git and should not be committed.
+
+Alternatively, set the token in the shell environment:
 
 ```powershell
 $env:ALERTS_IN_UA_TOKEN = "your-token"
@@ -33,7 +41,8 @@ Authorization: Bearer <token>
 ## Alert Response Schema
 
 `/v1/alerts/active.json` and `/v1/regions/{uid}/alerts/month_ago.json`
-return:
+return an object with an `alerts` list. The active-alert response observed in
+the smoke test also included `meta` and `disclaimer` top-level fields.
 
 ```json
 {
@@ -50,10 +59,17 @@ return:
       "location_oblast": "Луганська область",
       "location_oblast_uid": "16",
       "location_raion": "Луганський район",
+      "country": null,
+      "deleted_at": null,
       "notes": "За повідомленям голови ОВА",
       "calculated": false
     }
-  ]
+  ],
+  "meta": {
+    "last_updated_at": "2026-06-21T09:20:08.000Z",
+    "type": "full"
+  },
+  "disclaimer": "..."
 }
 ```
 
@@ -91,4 +107,3 @@ The docs list:
 
 The local client adds a default pause between sequential calls and raises a
 specific rate-limit error on HTTP 429.
-

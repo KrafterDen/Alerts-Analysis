@@ -4,7 +4,7 @@ Usage:
     python scripts/api_smoke_test.py
     python scripts/api_smoke_test.py --include-history --uid 31
 
-Set ALERTS_IN_UA_TOKEN before running.
+Set ALERTS_IN_UA_TOKEN in .env before running.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from api_client import (  # noqa: E402
     AlertsInUaClient,
     AlertsInUaError,
     MissingTokenError,
+    load_environment,
 )
 
 
@@ -58,8 +59,10 @@ def main() -> int:
     print("Disclaimer: educational data exploration only; not for operational use.")
     print()
 
+    load_environment(PROJECT_ROOT / ".env")
+
     if not os.getenv(TOKEN_ENV_VAR):
-        print(f"Missing token. Set {TOKEN_ENV_VAR} and run this script again.")
+        print(f"Missing token. Set {TOKEN_ENV_VAR} in .env and run this script again.")
         return 2
 
     try:

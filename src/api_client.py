@@ -23,9 +23,11 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
+from dotenv import find_dotenv, load_dotenv
 
 
 API_BASE_URL = "https://api.alerts.in.ua"
@@ -93,6 +95,24 @@ class AlertsInUaResponseError(AlertsInUaError):
     """Raised when a response does not match the expected schema."""
 
 
+def load_environment(
+    dotenv_path: str | os.PathLike[str] | None = None,
+    *,
+    override: bool = False,
+) -> bool:
+    """Load environment variables from a .env file using python-dotenv."""
+
+    if dotenv_path is None:
+        dotenv_file = find_dotenv(usecwd=True)
+    else:
+        dotenv_file = str(Path(dotenv_path))
+
+    if not dotenv_file:
+        return False
+
+    return load_dotenv(dotenv_path=dotenv_file, override=override)
+
+
 @dataclass(frozen=True)
 class ResponseMeta:
     """Minimal response metadata useful during API exploration."""
@@ -124,10 +144,14 @@ class AlertsInUaClient:
         min_interval_seconds: float = DEFAULT_MIN_INTERVAL_SECONDS,
         session: requests.Session | None = None,
     ) -> None:
+        if token is None:
+            load_environment()
+
         self.token = token or os.getenv(TOKEN_ENV_VAR)
         if not self.token:
             raise MissingTokenError(
-                f"Missing API token. Set the {TOKEN_ENV_VAR} environment variable."
+                f"Missing API token. Set {TOKEN_ENV_VAR} in the environment "
+                "or in a local .env file."
             )
 
         self.base_url = base_url.rstrip("/")
@@ -367,4 +391,3 @@ class AlertsInUaClient:
         if not uid_text.isdigit():
             raise ValueError(f"UID must be numeric, got {uid!r}.")
         return uid_text
-
