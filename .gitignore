@@ -7,6 +7,10 @@ data/raw/*.csv
 data/processed/*.csv
 data/processed/*.json
 data/raw/api_delta/*.json
+outputs/figures/*.png
+outputs/tables/*.csv
 !data/raw/.gitkeep
 !data/raw/api_delta/.gitkeep
 !data/processed/.gitkeep
+!outputs/figures/.gitkeep
+!outputs/tables/.gitkeep
