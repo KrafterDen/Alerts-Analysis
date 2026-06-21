@@ -5,5 +5,7 @@ __pycache__/
 .pytest_cache/
 data/raw/*.csv
 data/processed/*.csv
+data/raw/api_delta/*.json
 !data/raw/.gitkeep
+!data/raw/api_delta/.gitkeep
 !data/processed/.gitkeep
