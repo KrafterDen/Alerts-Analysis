@@ -10,7 +10,12 @@ from src.events import (
     build_expanded_event_calendar,
     print_event_summary,
 )
-from src.forecast import print_forecast_summary, run_forecast
+from src.forecast import (
+    print_forecast_60d_summary,
+    print_forecast_summary,
+    run_forecast,
+    run_forecast_60d,
+)
 from src.timeline_viz import build_and_save_timeline, print_timeline_summary
 
 
@@ -63,6 +68,17 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="Fraction of latest dates used for the time-based test split.",
     )
+    forecast.add_argument(
+        "--horizon",
+        type=int,
+        default=1,
+        help="Forecast horizon in days. Use 1 for next-day risk, or 60 for the expanded future forecast.",
+    )
+    forecast.add_argument(
+        "--models",
+        default="baselines",
+        help="Comma-separated 60-day models to run. Supported: baselines,lstm.",
+    )
 
     timeline = subparsers.add_parser(
         "timeline",
@@ -100,8 +116,15 @@ def main() -> int:
         return 0
 
     if args.command == "forecast":
-        result = run_forecast(model_type=args.model, test_size=args.test_size)
-        print_forecast_summary(result)
+        if args.horizon <= 1:
+            result = run_forecast(model_type=args.model, test_size=args.test_size)
+            print_forecast_summary(result)
+        else:
+            result_60d = run_forecast_60d(
+                horizon=args.horizon,
+                models=args.models,
+            )
+            print_forecast_60d_summary(result_60d)
         return 0
 
     if args.command == "timeline":

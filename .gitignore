@@ -12,6 +12,8 @@ outputs/figures/*.png
 outputs/*.html
 outputs/tables/*.csv
 outputs/tables/*.json
+outputs/models/*.pt
+outputs/models/*.json
 !data/raw/.gitkeep
 !data/raw/api_delta/.gitkeep
 !data/processed/.gitkeep

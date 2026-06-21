@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DAILY_PATH = PROJECT_ROOT / "data" / "processed" / "daily_oblast_timeseries.csv"
 EVENT_LEVEL_PATH = PROJECT_ROOT / "data" / "processed" / "alerts_merged_event_level.csv"
 FORECAST_PATH = PROJECT_ROOT / "data" / "processed" / "forecast_daily_oblast.csv"
+FORECAST_60D_PATH = PROJECT_ROOT / "data" / "processed" / "forecast_60d_oblast.csv"
 EVENTS_PATH = PROJECT_ROOT / "data" / "processed" / "expanded_event_calendar.csv"
 SUMMARY_PATH = PROJECT_ROOT / "outputs" / "tables" / "oblast_summary.csv"
 GEOJSON_PATH = PROJECT_ROOT / "data" / "geo" / "ukraine_adm1_geoboundaries.geojson"
@@ -237,7 +238,7 @@ def inject_css() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     daily = pd.read_csv(DAILY_PATH)
     daily["date"] = pd.to_datetime(daily["date"], errors="coerce")
     daily["date_kyiv"] = pd.to_datetime(daily["date_kyiv"], errors="coerce")
@@ -266,6 +267,39 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
         forecast["model_probability"], errors="coerce"
     )
 
+    if FORECAST_60D_PATH.exists():
+        forecast_60d = pd.read_csv(FORECAST_60D_PATH)
+    else:
+        forecast_60d = pd.DataFrame(
+            columns=[
+                "forecast_date",
+                "oblast_name",
+                "model_name",
+                "predicted_alert_probability",
+                "predicted_alert_count",
+                "predicted_alert_minutes",
+                "is_event_window",
+                "event_category",
+                "event_name",
+                "forecast_origin_date",
+                "horizon_day",
+            ]
+        )
+    for column in ["forecast_date", "forecast_origin_date"]:
+        if column in forecast_60d.columns:
+            forecast_60d[column] = pd.to_datetime(forecast_60d[column], errors="coerce")
+    for column in [
+        "predicted_alert_probability",
+        "predicted_alert_count",
+        "predicted_alert_minutes",
+    ]:
+        if column in forecast_60d.columns:
+            forecast_60d[column] = pd.to_numeric(forecast_60d[column], errors="coerce")
+    if "horizon_day" in forecast_60d.columns:
+        forecast_60d["horizon_day"] = pd.to_numeric(
+            forecast_60d["horizon_day"], errors="coerce"
+        )
+
     event_calendar = pd.read_csv(EVENTS_PATH)
     for column in ["event_date", "window_start_date", "window_end_date"]:
         event_calendar[column] = pd.to_datetime(event_calendar[column], errors="coerce")
@@ -274,7 +308,7 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     ).fillna(event_calendar["category"])
 
     summary = pd.read_csv(SUMMARY_PATH)
-    return daily, events, forecast, event_calendar, summary
+    return daily, events, forecast, forecast_60d, event_calendar, summary
 
 
 def format_number(value: float, digits: int = 0) -> str:
@@ -368,7 +402,41 @@ def filter_event_level(
     return events.loc[mask].copy()
 
 
-def latest_future_risk(forecast: pd.DataFrame, oblast: str) -> tuple[float | None, pd.Timestamp | None]:
+def available_forecast_models(forecast_60d: pd.DataFrame) -> list[str]:
+    if forecast_60d.empty or "model_name" not in forecast_60d.columns:
+        return []
+    return sorted(str(value) for value in forecast_60d["model_name"].dropna().unique())
+
+
+def selected_forecast_frame(
+    forecast_60d: pd.DataFrame,
+    selected_model: str,
+) -> pd.DataFrame:
+    if forecast_60d.empty or not selected_model:
+        return forecast_60d.iloc[0:0].copy()
+    rows = forecast_60d[forecast_60d["model_name"].eq(selected_model)].copy()
+    return rows.sort_values(["forecast_date", "oblast_name"])
+
+
+def latest_future_risk(
+    forecast: pd.DataFrame,
+    forecast_60d: pd.DataFrame,
+    oblast: str,
+    selected_model: str,
+) -> tuple[float | None, pd.Timestamp | None]:
+    model_rows = selected_forecast_frame(forecast_60d, selected_model)
+    if not model_rows.empty:
+        rows = model_rows[
+            model_rows["oblast_name"].eq(oblast)
+            & model_rows["horizon_day"].eq(1)
+            & model_rows["predicted_alert_probability"].notna()
+        ].sort_values("forecast_date")
+        if not rows.empty:
+            latest = rows.iloc[-1]
+            return float(latest["predicted_alert_probability"]), pd.Timestamp(
+                latest["forecast_date"]
+            )
+
     rows = forecast[
         forecast["oblast_name"].eq(oblast)
         & forecast["split"].eq("future")
@@ -383,10 +451,12 @@ def latest_future_risk(forecast: pd.DataFrame, oblast: str) -> tuple[float | Non
 def build_map_metric_table(
     daily: pd.DataFrame,
     forecast: pd.DataFrame,
+    forecast_60d: pd.DataFrame,
     geojson: dict,
     metric: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
+    selected_model: str,
 ) -> tuple[pd.DataFrame, str]:
     features = []
     for feature in geojson.get("features", []):
@@ -402,19 +472,32 @@ def build_map_metric_table(
     map_df = pd.DataFrame(features)
 
     if metric == "predicted_risk":
-        future = forecast[forecast["split"].eq("future")].copy()
-        future = future.sort_values("forecast_date").drop_duplicates(
-            subset=["oblast_name"], keep="last"
-        )
-        values = future[["oblast_name", "model_probability", "forecast_date"]].rename(
-            columns={"model_probability": "metric_value"}
-        )
-        reference_date = values["forecast_date"].dropna().max()
-        reference_label = (
-            f"Forecast date {reference_date:%Y-%m-%d}"
-            if pd.notna(reference_date)
-            else "Forecast date unavailable"
-        )
+        model_rows = selected_forecast_frame(forecast_60d, selected_model)
+        if not model_rows.empty:
+            future = model_rows[model_rows["horizon_day"].eq(1)].copy()
+            values = future[
+                ["oblast_name", "predicted_alert_probability", "forecast_date"]
+            ].rename(columns={"predicted_alert_probability": "metric_value"})
+            reference_date = values["forecast_date"].dropna().max()
+            reference_label = (
+                f"{selected_model} day-1 risk for {reference_date:%Y-%m-%d}"
+                if pd.notna(reference_date)
+                else f"{selected_model} forecast date unavailable"
+            )
+        else:
+            future = forecast[forecast["split"].eq("future")].copy()
+            future = future.sort_values("forecast_date").drop_duplicates(
+                subset=["oblast_name"], keep="last"
+            )
+            values = future[
+                ["oblast_name", "model_probability", "forecast_date"]
+            ].rename(columns={"model_probability": "metric_value"})
+            reference_date = values["forecast_date"].dropna().max()
+            reference_label = (
+                f"Forecast date {reference_date:%Y-%m-%d}"
+                if pd.notna(reference_date)
+                else "Forecast date unavailable"
+            )
     else:
         filtered = daily[daily["date"].between(start, end)].copy()
         values = (
@@ -641,19 +724,23 @@ def extract_oblast_from_map_event(map_event: object) -> tuple[str | None, str | 
 def render_oblast_map(
     daily: pd.DataFrame,
     forecast: pd.DataFrame,
+    forecast_60d: pd.DataFrame,
     metric: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
     selected_oblast: str,
+    selected_model: str,
 ) -> None:
     geojson = load_ukraine_geojson()
     map_df, reference_label = build_map_metric_table(
         daily=daily,
         forecast=forecast,
+        forecast_60d=forecast_60d,
         geojson=geojson,
         metric=metric,
         start=start,
         end=end,
+        selected_model=selected_model,
     )
     map_figure = build_oblast_map_figure(
         map_df=map_df,
@@ -704,6 +791,7 @@ def render_control_strip(
     default_oblast: str,
     min_date: date,
     max_date: date,
+    model_options: list[str],
 ) -> None:
     st.markdown('<div class="control-strip-title">Dashboard controls</div>', unsafe_allow_html=True)
     with st.container(border=True):
@@ -734,15 +822,14 @@ def render_control_strip(
                 key="selected_metric",
             )
         with model_col:
+            current_model = st.session_state.get("selected_model")
+            if current_model not in model_options and model_options:
+                st.session_state["selected_model"] = model_options[0]
             st.selectbox(
                 "Forecast model",
-                options=[
-                    "Baseline next-day risk",
-                    "60-day baseline planned",
-                    "LSTM planned",
-                ],
+                options=model_options if model_options else ["Baseline next-day risk"],
                 key="selected_model",
-                disabled=True,
+                disabled=not model_options,
             )
         with toggles_col:
             st.toggle("Show event windows", key="show_event_windows")
@@ -785,8 +872,10 @@ def most_active_day(filtered_daily: pd.DataFrame) -> str:
 def build_regional_table(
     daily: pd.DataFrame,
     forecast: pd.DataFrame,
+    forecast_60d: pd.DataFrame,
     summary: pd.DataFrame,
     metric: str,
+    selected_model: str,
 ) -> pd.DataFrame:
     latest_date = daily["date"].max()
     latest_daily = daily[daily["date"].eq(latest_date)].copy()
@@ -794,11 +883,18 @@ def build_regional_table(
         ["oblast_name", "alert_count", "total_alert_minutes", "had_alert_binary"]
     ]
 
-    future = forecast[forecast["split"].eq("future")].copy()
-    future = future.sort_values("forecast_date").drop_duplicates(
-        subset=["oblast_name"], keep="last"
-    )
-    future = future[["oblast_name", "forecast_date", "model_probability"]]
+    future_60d = selected_forecast_frame(forecast_60d, selected_model)
+    if not future_60d.empty:
+        future = future_60d[future_60d["horizon_day"].eq(1)].copy()
+        future = future[
+            ["oblast_name", "forecast_date", "predicted_alert_probability"]
+        ].rename(columns={"predicted_alert_probability": "model_probability"})
+    else:
+        future = forecast[forecast["split"].eq("future")].copy()
+        future = future.sort_values("forecast_date").drop_duplicates(
+            subset=["oblast_name"], keep="last"
+        )
+        future = future[["oblast_name", "forecast_date", "model_probability"]]
 
     table = (
         summary[["oblast_name", "total_alert_hours", "total_alerts"]]
@@ -1003,34 +1099,40 @@ def format_event_marker_label(row: pd.Series) -> str:
 def build_event_timeline(
     daily: pd.DataFrame,
     forecast: pd.DataFrame,
+    forecast_60d: pd.DataFrame,
     event_calendar: pd.DataFrame,
     oblast: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
     metric: str,
+    selected_model: str,
     show_event_windows: bool = True,
 ) -> go.Figure:
     actual_metric = "alert_count" if metric == "predicted_risk" else metric
     filtered_daily = filter_daily(daily, oblast, start, end)
-    risk, risk_date = latest_future_risk(forecast, oblast)
-    include_future = risk_date is not None and end >= daily["date"].max().normalize()
+    risk, risk_date = latest_future_risk(forecast, forecast_60d, oblast, selected_model)
+    model_rows = selected_forecast_frame(forecast_60d, selected_model)
+    future_model_rows = model_rows[model_rows["oblast_name"].eq(oblast)].copy()
+    include_future = not future_model_rows.empty and end >= daily["date"].max().normalize()
 
     timeline = filtered_daily[["date", "oblast_name", "alert_count", "total_alert_minutes"]].copy()
-    if include_future and risk_date not in set(timeline["date"]):
-        timeline = pd.concat(
-            [
-                timeline,
-                pd.DataFrame(
-                    {
-                        "date": [risk_date],
-                        "oblast_name": [oblast],
-                        "alert_count": [None],
-                        "total_alert_minutes": [None],
-                    }
-                ),
-            ],
-            ignore_index=True,
-        )
+    if include_future:
+        missing_future_dates = sorted(set(future_model_rows["forecast_date"]) - set(timeline["date"]))
+        if missing_future_dates:
+            timeline = pd.concat(
+                [
+                    timeline,
+                    pd.DataFrame(
+                        {
+                            "date": missing_future_dates,
+                            "oblast_name": [oblast] * len(missing_future_dates),
+                            "alert_count": [None] * len(missing_future_dates),
+                            "total_alert_minutes": [None] * len(missing_future_dates),
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
     timeline["has_actual_data"] = timeline["alert_count"].notna()
     timeline = add_event_context(timeline.sort_values("date"), event_calendar)
 
@@ -1104,43 +1206,51 @@ def build_event_timeline(
         secondary_y=False,
     )
 
-    if include_future and risk is not None and risk_date is not None:
+    forecast_column = forecast_metric_column(metric)
+    if include_future and not future_model_rows.empty:
+        future_model_rows = future_model_rows.sort_values("forecast_date")
+        future_y = future_model_rows[forecast_column]
         figure.add_trace(
             go.Scatter(
-                x=[risk_date],
-                y=[risk],
-                mode="markers+text",
-                name="Future next-day risk",
-                marker=dict(
-                    color=ALERT_CORAL,
-                    size=15,
-                    symbol="circle",
-                    line=dict(color="#fffdf8", width=2),
-                ),
-                text=[format_probability(risk)],
-                textposition="middle right",
-                textfont=dict(color=ALERT_CORAL, size=16),
+                x=future_model_rows["forecast_date"],
+                y=future_y,
+                mode="lines+markers",
+                name=f"Forecast: {selected_model}",
+                marker=dict(color=ALERT_CORAL, size=8, line=dict(color="#fffdf8", width=1.2)),
+                line=dict(color=ALERT_CORAL, width=2.6, dash="dash"),
+                customdata=future_model_rows[
+                    ["predicted_alert_count", "predicted_alert_minutes", "event_name"]
+                ].fillna("").to_numpy(),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
                     f"Oblast: {oblast}<br>"
-                    "Future next-day risk: %{text}<extra></extra>"
+                    + (
+                        "Predicted risk: %{y:.1%}<br>"
+                        if metric == "predicted_risk"
+                        else (
+                            "Predicted alert count: %{customdata[0]:,.1f}<br>"
+                            "Predicted alert minutes: %{customdata[1]:,.1f}<br>"
+                        )
+                    )
+                    + "Event: %{customdata[2]}<extra></extra>"
                 ),
             ),
             row=2,
             col=1,
-            secondary_y=True,
+            secondary_y=(metric == "predicted_risk"),
         )
-        figure.add_shape(
-            type="line",
-            x0=risk_date,
-            x1=risk_date,
-            y0=0,
-            y1=1,
-            xref="x2",
-            yref="paper",
-            line=dict(color=ALERT_CORAL, width=1.5, dash="dash"),
-            layer="above",
-        )
+        if risk is not None and risk_date is not None:
+            figure.add_shape(
+                type="line",
+                x0=risk_date,
+                x1=risk_date,
+                y0=0,
+                y1=1,
+                xref="x2",
+                yref="paper",
+                line=dict(color=ALERT_CORAL, width=1.5, dash="dash"),
+                layer="above",
+            )
 
     if not visible_events.empty:
         marker_rows = visible_events.sort_values(
@@ -1185,7 +1295,7 @@ def build_event_timeline(
         title=dict(
             text=(
                 f"Holiday and symbolic-date timeline: {oblast}<br>"
-                "<sup>Actual historical activity with future risk shown only at the right edge.</sup>"
+                f"<sup>Historical activity with future-only {selected_model} forecast overlay.</sup>"
             ),
             x=0.02,
             xanchor="left",
@@ -1224,12 +1334,96 @@ def build_event_timeline(
     figure.update_yaxes(
         row=2,
         col=1,
-        title_text="Future next-day risk",
+        title_text="Predicted alert probability" if metric == "predicted_risk" else "",
         secondary_y=True,
         range=[0, 1],
         tickformat=".0%",
         showgrid=False,
+        visible=(metric == "predicted_risk"),
     )
+    return figure
+
+
+def forecast_metric_column(metric: str) -> str:
+    if metric == "alert_count":
+        return "predicted_alert_count"
+    if metric == "total_alert_minutes":
+        return "predicted_alert_minutes"
+    return "predicted_alert_probability"
+
+
+def forecast_metric_label(metric: str) -> str:
+    if metric == "alert_count":
+        return "Expected daily alert count"
+    if metric == "total_alert_minutes":
+        return "Expected daily alert minutes"
+    return "Predicted alert probability"
+
+
+def forecast_summary_values(
+    forecast_60d: pd.DataFrame,
+    oblast: str,
+    selected_model: str,
+) -> tuple[pd.DataFrame, float | None, float | None]:
+    rows = selected_forecast_frame(forecast_60d, selected_model)
+    rows = rows[rows["oblast_name"].eq(oblast)].copy()
+    if rows.empty:
+        return rows, None, None
+    return (
+        rows,
+        float(rows["predicted_alert_count"].sum()),
+        float(rows["predicted_alert_minutes"].sum()),
+    )
+
+
+def forecast_curve_chart(
+    forecast_60d: pd.DataFrame,
+    oblast: str,
+    selected_model: str,
+    metric: str,
+) -> go.Figure:
+    rows = selected_forecast_frame(forecast_60d, selected_model)
+    rows = rows[rows["oblast_name"].eq(oblast)].copy()
+    column = forecast_metric_column(metric)
+    label = forecast_metric_label(metric)
+    figure = go.Figure()
+    if rows.empty:
+        figure.add_annotation(
+            text="No 60-day forecast available for the selected model.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(size=15, color=TEXT_DARK),
+        )
+        return base_figure_layout(figure, "60-day forecast path")
+
+    hover_template = (
+        "<b>%{x|%Y-%m-%d}</b><br>"
+        f"{label}: "
+        + ("%{y:.1%}" if metric == "predicted_risk" else "%{y:,.1f}")
+        + "<br>Event: %{customdata[0]}<extra></extra>"
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=rows["forecast_date"],
+            y=rows[column],
+            mode="lines+markers",
+            line=dict(color=ALERT_CORAL, width=2.8),
+            marker=dict(size=6, color=ALERT_CORAL),
+            name=selected_model,
+            customdata=rows[["event_name"]].fillna("").to_numpy(),
+            hovertemplate=hover_template,
+        )
+    )
+    base_figure_layout(
+        figure,
+        f"60-day forecast path: {selected_model}",
+        forecast_metric_label(metric),
+    )
+    if metric == "predicted_risk":
+        figure.update_yaxes(tickformat=".0%", range=[0, 1])
     return figure
 
 
@@ -1267,7 +1461,7 @@ def render_scrollable_plotly(figure: go.Figure, height: int = 810) -> None:
 
 def main() -> None:
     inject_css()
-    daily, events, forecast, event_calendar, summary = load_data()
+    daily, events, forecast, forecast_60d, event_calendar, summary = load_data()
 
     min_date = daily["date"].min().date()
     max_date = daily["date"].max().date()
@@ -1279,7 +1473,11 @@ def main() -> None:
     st.session_state.setdefault("selected_metric", "alert_count")
     st.session_state.setdefault("show_event_windows", True)
     st.session_state.setdefault("show_rolling_average", True)
-    st.session_state.setdefault("selected_model", "Baseline next-day risk")
+    model_options = available_forecast_models(forecast_60d)
+    default_model = model_options[0] if model_options else "Baseline next-day risk"
+    st.session_state.setdefault("selected_model", default_model)
+    if st.session_state["selected_model"] not in model_options and model_options:
+        st.session_state["selected_model"] = default_model
 
     with st.sidebar:
         st.header("Fallback and sources")
@@ -1308,16 +1506,19 @@ def main() -> None:
     render_oblast_map(
         daily=daily,
         forecast=forecast,
+        forecast_60d=forecast_60d,
         metric=metric,
         start=start_date,
         end=end_date,
         selected_oblast=selected_oblast,
+        selected_model=st.session_state["selected_model"],
     )
     render_control_strip(
         oblasts=oblasts,
         default_oblast=default_oblast,
         min_date=min_date,
         max_date=max_date,
+        model_options=model_options,
     )
 
     start_date, end_date = normalize_date_range(
@@ -1327,9 +1528,15 @@ def main() -> None:
         start_date, end_date = end_date, start_date
     metric = st.session_state["selected_metric"]
     selected_oblast = st.session_state["selected_oblast"]
+    selected_model = st.session_state["selected_model"]
     filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
     filtered_events = filter_event_level(events, selected_oblast, start_date, end_date)
-    risk, risk_date = latest_future_risk(forecast, selected_oblast)
+    risk, risk_date = latest_future_risk(
+        forecast,
+        forecast_60d,
+        selected_oblast,
+        selected_model,
+    )
 
     if filtered_daily.empty:
         st.warning("No daily records found for this oblast and date range.")
@@ -1338,7 +1545,14 @@ def main() -> None:
     total_alerts = float(filtered_daily["alert_count"].sum())
     total_minutes = float(filtered_daily["total_alert_minutes"].sum())
     avg_duration = total_minutes / total_alerts if total_alerts else 0
-    regional_table = build_regional_table(daily, forecast, summary, metric)
+    regional_table = build_regional_table(
+        daily,
+        forecast,
+        forecast_60d,
+        summary,
+        metric,
+        selected_model,
+    )
 
     overview_tab, historical_tab, forecast_tab, timeline_tab, data_tab = st.tabs(
         ["Overview", "Historical", "Forecast", "Events timeline", "Data"]
@@ -1425,12 +1639,17 @@ def main() -> None:
         st.markdown(
             """
             <div class="tab-panel-note">
-            Current output is the real baseline next-day alert probability. The
-            60-day count/minutes forecast and LSTM model selector are planned for
-            the next forecasting stage, so no synthetic 60-day values are shown here.
+            Current output shows exploratory 60-day expected values and next-day risk
+            from the selected forecast model. These values are analytical comparisons only,
+            not operational prediction.
             </div>
             """,
             unsafe_allow_html=True,
+        )
+        forecast_rows, forecast_count_sum, forecast_minutes_sum = forecast_summary_values(
+            forecast_60d,
+            selected_oblast,
+            selected_model,
         )
         forecast_cols = st.columns(5)
         with forecast_cols[0]:
@@ -1440,26 +1659,50 @@ def main() -> None:
                 f"{risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
             )
         with forecast_cols[1]:
-            metric_card("Model", "Baseline", "Current available model")
+            metric_card("Model", selected_model, "Selected forecast path")
         with forecast_cols[2]:
-            metric_card("60-day alert count", "Planned", "Next stage")
+            metric_card(
+                "60-day alert count",
+                format_number(forecast_count_sum or 0, 1),
+                "Expected sum",
+            )
         with forecast_cols[3]:
-            metric_card("60-day alert minutes", "Planned", "Next stage")
+            metric_card(
+                "60-day alert hours",
+                format_number((forecast_minutes_sum or 0) / 60, 1),
+                "Expected sum",
+            )
         with forecast_cols[4]:
-            metric_card("LSTM model", "Planned", "Python 3.12 if needed")
+            metric_card(
+                "Forecast horizon",
+                f"{int(forecast_rows['horizon_day'].max())} days" if not forecast_rows.empty else "n/a",
+                "Future-only window",
+            )
 
-        future_rows = forecast[
-            forecast["split"].eq("future")
-            & forecast["model_probability"].notna()
-        ].copy()
-        future_rows = future_rows.sort_values(
-            "forecast_date"
-        ).drop_duplicates("oblast_name", keep="last")
-        future_rows["next_day_risk"] = future_rows["model_probability"].map(
-            format_probability
+        st.plotly_chart(
+            forecast_curve_chart(
+                forecast_60d,
+                selected_oblast,
+                selected_model,
+                metric,
+            ),
+            use_container_width=True,
+            theme=None,
         )
-        st.dataframe(
-            future_rows[
+
+        future_rows = forecast_rows.copy()
+        if future_rows.empty:
+            future_rows = forecast[
+                forecast["split"].eq("future")
+                & forecast["model_probability"].notna()
+            ].copy()
+            future_rows = future_rows.sort_values(
+                "forecast_date"
+            ).drop_duplicates("oblast_name", keep="last")
+            future_rows["next_day_risk"] = future_rows["model_probability"].map(
+                format_probability
+            )
+            display_frame = future_rows[
                 ["oblast_name", "forecast_date", "next_day_risk", "model_prediction"]
             ].rename(
                 columns={
@@ -1468,7 +1711,32 @@ def main() -> None:
                     "next_day_risk": "Next-day risk",
                     "model_prediction": "Baseline class",
                 }
-            ),
+            )
+        else:
+            future_rows["next_day_risk"] = future_rows[
+                "predicted_alert_probability"
+            ].map(format_probability)
+            display_frame = future_rows[
+                [
+                    "forecast_date",
+                    "oblast_name",
+                    "predicted_alert_count",
+                    "predicted_alert_minutes",
+                    "next_day_risk",
+                    "event_category",
+                ]
+            ].rename(
+                columns={
+                    "oblast_name": "Oblast",
+                    "forecast_date": "Forecast date",
+                    "predicted_alert_count": "Expected alerts",
+                    "predicted_alert_minutes": "Expected minutes",
+                    "next_day_risk": "Predicted risk",
+                    "event_category": "Event category",
+                }
+            )
+        st.dataframe(
+            display_frame,
             use_container_width=True,
             hide_index=True,
         )
@@ -1486,11 +1754,13 @@ def main() -> None:
         timeline_figure = build_event_timeline(
             daily,
             forecast,
+            forecast_60d,
             event_calendar,
             selected_oblast,
             start_date,
             end_date,
             metric,
+            selected_model,
             show_event_windows=st.session_state["show_event_windows"],
         )
         render_scrollable_plotly(timeline_figure)
