@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 
 try:
@@ -56,6 +58,11 @@ ACTIVITY_LABELS = {
     "alert_count": "Daily alert count",
     "total_alert_minutes": "Daily alert minutes",
 }
+
+EVENT_LABEL_LANES = 4
+TIMELINE_MIN_WIDTH_PX = 4200
+TIMELINE_MAX_WIDTH_PX = 9600
+TIMELINE_PIXELS_PER_DAY = 5
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -201,6 +208,7 @@ def prepare_timeline_data(
         on="date",
         how="left",
     )
+    timeline["has_actual_data"] = timeline["alert_count"].notna()
     timeline[["alert_count", "total_alert_minutes"]] = timeline[
         ["alert_count", "total_alert_minutes"]
     ].fillna(0)
@@ -289,28 +297,35 @@ def build_timeline_figure(data: TimelineData) -> go.Figure:
     timeline = data.timeline
     activity_metric = data.activity_metric
     activity_label = ACTIVITY_LABELS[activity_metric]
-    activity_max = max(float(timeline[activity_metric].max()), 1.0)
+    actual_timeline = timeline[timeline["has_actual_data"]].copy()
+    activity_max = max(float(actual_timeline[activity_metric].max()), 1.0)
+    figure_width = calculate_timeline_width(timeline)
 
-    figure = make_subplots(specs=[[{"secondary_y": True}]])
+    figure = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.28, 0.72],
+        vertical_spacing=0.02,
+        specs=[[{}], [{"secondary_y": True}]],
+    )
     add_event_windows(figure, data.events, timeline)
 
-    customdata = timeline[
+    customdata = actual_timeline[
         [
             "oblast_name",
             "alert_count",
             "total_alert_minutes",
-            "model_probability_label",
             "hover_event_text",
-            "split",
         ]
     ].to_numpy()
 
     figure.add_trace(
         go.Scatter(
-            x=timeline["date"],
-            y=timeline[activity_metric],
+            x=actual_timeline["date"],
+            y=actual_timeline[activity_metric],
             mode="lines",
-            name=activity_label,
+            name=f"Historical {activity_label.lower()}",
             line=dict(color="#1d4ed8", width=2.4),
             customdata=customdata,
             hovertemplate=(
@@ -318,51 +333,91 @@ def build_timeline_figure(data: TimelineData) -> go.Figure:
                 "Oblast: %{customdata[0]}<br>"
                 "Actual alert count: %{customdata[1]:,.0f}<br>"
                 "Actual alert minutes: %{customdata[2]:,.1f}<br>"
-                "Predicted risk: %{customdata[3]}<br>"
-                "Event: %{customdata[4]}<extra></extra>"
+                "Event: %{customdata[3]}<extra></extra>"
             ),
         ),
+        row=2,
+        col=1,
         secondary_y=False,
     )
 
-    forecast_line = timeline[timeline["model_probability"].notna()].copy()
-    figure.add_trace(
-        go.Scatter(
-            x=forecast_line["date"],
-            y=forecast_line["model_probability"],
-            mode="lines",
-            name="Predicted next-day alert probability",
-            line=dict(color="#dc2626", width=2.2, dash="dot"),
-            customdata=forecast_line[
-                [
-                    "oblast_name",
-                    "alert_count",
-                    "total_alert_minutes",
-                    "model_probability_label",
-                    "hover_event_text",
-                    "split",
-                ]
-            ].to_numpy(),
-            hovertemplate=(
-                "<b>%{x|%Y-%m-%d}</b><br>"
-                "Oblast: %{customdata[0]}<br>"
-                "Actual alert count: %{customdata[1]:,.0f}<br>"
-                "Actual alert minutes: %{customdata[2]:,.1f}<br>"
-                "Predicted risk: %{customdata[3]}<br>"
-                "Forecast split: %{customdata[5]}<br>"
-                "Event: %{customdata[4]}<extra></extra>"
-            ),
-        ),
-        secondary_y=True,
-    )
+    add_future_forecast_marker(figure, timeline)
 
-    add_event_markers(figure, data.events, timeline, activity_max)
+    add_event_markers(figure, data.events, timeline)
     style_timeline_figure(
         figure,
         selected_oblast=data.selected_oblast,
         activity_label=activity_label,
+        activity_max=activity_max,
+        figure_width=figure_width,
     )
     return figure
+
+
+def calculate_timeline_width(timeline: pd.DataFrame) -> int:
+    """Choose a wide fixed canvas so the HTML can scroll horizontally."""
+
+    start = pd.Timestamp(timeline["date"].min())
+    end = pd.Timestamp(timeline["date"].max())
+    span_days = max(int((end - start).days), 1)
+    width = span_days * TIMELINE_PIXELS_PER_DAY
+    return min(max(width, TIMELINE_MIN_WIDTH_PX), TIMELINE_MAX_WIDTH_PX)
+
+
+def add_future_forecast_marker(figure: go.Figure, timeline: pd.DataFrame) -> None:
+    """Add forecast only for future dates, never over historical data."""
+
+    future_forecast = timeline[
+        timeline["split"].eq("future") & timeline["model_probability"].notna()
+    ].copy()
+    if future_forecast.empty:
+        return
+
+    future_forecast["risk_text"] = future_forecast["model_probability"].map(
+        format_probability
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=future_forecast["date"],
+            y=future_forecast["model_probability"],
+            mode="markers+text",
+            name="Future next-day risk",
+            marker=dict(
+                color="#dc2626",
+                size=15,
+                symbol="circle",
+                line=dict(color="white", width=2),
+            ),
+            text=future_forecast["risk_text"],
+            textposition="middle right",
+            textfont=dict(color="#dc2626", size=16),
+            customdata=future_forecast[
+                ["oblast_name", "risk_text", "hover_event_text"]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d}</b><br>"
+                "Oblast: %{customdata[0]}<br>"
+                "Future next-day risk: %{customdata[1]}<br>"
+                "Event: %{customdata[2]}<extra></extra>"
+            ),
+        ),
+        row=2,
+        col=1,
+        secondary_y=True,
+    )
+
+    forecast_date = pd.Timestamp(future_forecast["date"].max())
+    figure.add_shape(
+        type="line",
+        x0=forecast_date,
+        x1=forecast_date,
+        y0=0,
+        y1=1,
+        xref="x2",
+        yref="paper",
+        line=dict(color="#dc2626", width=1.5, dash="dash"),
+        layer="above",
+    )
 
 
 def add_event_windows(
@@ -386,11 +441,23 @@ def add_event_windows(
             x1=window_end,
             y0=0,
             y1=1,
-            xref="x",
+            xref="x2",
             yref="paper",
             fillcolor=color,
-            opacity=0.08,
+            opacity=0.07,
             line=dict(width=0),
+            layer="below",
+        )
+        figure.add_shape(
+            type="line",
+            x0=pd.Timestamp(row.event_date),
+            x1=pd.Timestamp(row.event_date),
+            y0=0,
+            y1=1,
+            xref="x2",
+            yref="paper",
+            line=dict(color=color, width=0.8),
+            opacity=0.24,
             layer="below",
         )
 
@@ -399,7 +466,6 @@ def add_event_markers(
     figure: go.Figure,
     events: pd.DataFrame,
     timeline: pd.DataFrame,
-    activity_max: float,
 ) -> None:
     """Add colored event date labels and hoverable markers."""
 
@@ -411,8 +477,12 @@ def add_event_markers(
     if marker_rows.empty:
         return
 
-    marker_rows["marker_y"] = activity_max * 1.07
-    marker_rows["short_label"] = marker_rows["name"].map(shorten_event_label)
+    marker_rows = marker_rows.sort_values(
+        ["event_date", "category", "name"]
+    ).reset_index(drop=True)
+    marker_rows["label_lane"] = marker_rows.index % EVENT_LABEL_LANES
+    marker_rows["marker_y"] = marker_rows["label_lane"]
+    marker_rows["short_label"] = marker_rows.apply(format_event_marker_label, axis=1)
 
     for category, category_rows in marker_rows.groupby("category", dropna=False):
         color = CATEGORY_COLORS.get(str(category), "#64748b")
@@ -425,13 +495,13 @@ def add_event_markers(
                 name=f"Event: {label}",
                 marker=dict(
                     color=color,
-                    size=9,
+                    size=11,
                     symbol="diamond",
                     line=dict(color="white", width=1),
                 ),
                 text=category_rows["short_label"],
                 textposition="top center",
-                textfont=dict(color=color, size=10),
+                textfont=dict(color=color, size=15),
                 customdata=category_rows[
                     [
                         "name",
@@ -449,8 +519,17 @@ def add_event_markers(
                     "Note: %{customdata[4]}<extra></extra>"
                 ),
             ),
-            secondary_y=False,
+            row=1,
+            col=1,
         )
+
+
+def format_event_marker_label(row: pd.Series) -> str:
+    """Format event labels with readable names and concrete dates."""
+
+    name = shorten_event_label(str(row["name"]))
+    date_label = pd.Timestamp(row["event_date"]).strftime("%d.%m.%Y")
+    return f"{name}<br>{date_label}"
 
 
 def shorten_event_label(name: str) -> str:
@@ -474,6 +553,8 @@ def style_timeline_figure(
     *,
     selected_oblast: str,
     activity_label: str,
+    activity_max: float,
+    figure_width: int,
 ) -> None:
     """Apply clean presentation styling."""
 
@@ -481,43 +562,72 @@ def style_timeline_figure(
         title=dict(
             text=(
                 f"Holiday and Symbolic-Date Timeline: {selected_oblast}<br>"
-                "<sup>Historical activity and exploratory next-day risk; "
-                "association/event-window comparison only, not operational prediction.</sup>"
+                "<sup>Historical activity only across observed dates; future risk is shown "
+                "only at the right edge. Association/event-window comparison, not for "
+                "operational use.</sup>"
             ),
             x=0.02,
             xanchor="left",
         ),
         template="plotly_white",
-        height=760,
+        width=figure_width,
+        height=840,
         hovermode="x unified",
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
+            y=1.01,
             xanchor="left",
             x=0,
             bgcolor="rgba(255,255,255,0.85)",
+            font=dict(size=13),
         ),
-        margin=dict(l=72, r=72, t=120, b=70),
+        margin=dict(l=82, r=96, t=130, b=90),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
         font=dict(family="Arial, sans-serif", color="#0f172a"),
     )
     figure.update_xaxes(
+        row=1,
+        col=1,
+        showgrid=False,
+        showticklabels=False,
+        zeroline=False,
+    )
+    figure.update_xaxes(
+        row=2,
+        col=1,
         title_text="Date",
         showgrid=True,
         gridcolor="#e2e8f0",
-        rangeslider=dict(visible=True, thickness=0.06),
+        rangeslider=dict(visible=False),
+    )
+    figure.update_layout(
+        xaxis=dict(domain=[0.0, 0.985]),
+        xaxis2=dict(domain=[0.0, 0.985]),
     )
     figure.update_yaxes(
+        row=1,
+        col=1,
+        title_text="",
+        range=[-0.6, EVENT_LABEL_LANES + 0.65],
+        showgrid=False,
+        zeroline=False,
+        showticklabels=False,
+    )
+    figure.update_yaxes(
+        row=2,
+        col=1,
         title_text=activity_label,
         secondary_y=False,
         showgrid=True,
         gridcolor="#e2e8f0",
-        rangemode="tozero",
+        range=[0, activity_max * 1.12],
     )
     figure.update_yaxes(
-        title_text="Predicted next-day alert probability",
+        row=2,
+        col=1,
+        title_text="Future next-day risk",
         secondary_y=True,
         tickformat=".0%",
         range=[0, 1],
@@ -532,22 +642,89 @@ def save_timeline_html(
     """Save a standalone HTML timeline preview."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.write_html(
-        output_path,
+    figure_width = int(figure.layout.width or TIMELINE_MIN_WIDTH_PX)
+    figure_height = int(figure.layout.height or 840)
+    figure_html = pio.to_html(
+        figure,
         include_plotlyjs=True,
-        full_html=True,
+        full_html=False,
         config={
             "displaylogo": False,
-            "responsive": True,
+            "responsive": False,
             "toImageButtonOptions": {
                 "format": "png",
                 "filename": "holiday_timeline_preview",
-                "height": 760,
-                "width": 1400,
+                "height": figure_height,
+                "width": figure_width,
                 "scale": 2,
             },
         },
     )
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(figure.layout.title.text.split('<br>')[0])}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --page-bg: #f8fafc;
+      --frame-border: #cbd5e1;
+      --text: #0f172a;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
+    body {{
+      margin: 0;
+      background: var(--page-bg);
+      color: var(--text);
+      font-family: Arial, sans-serif;
+    }}
+    main {{
+      padding: 20px;
+    }}
+    .timeline-frame {{
+      width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      border: 1px solid var(--frame-border);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+    }}
+    .timeline-inner {{
+      min-width: {figure_width}px;
+      width: {figure_width}px;
+      padding: 6px 8px 0;
+    }}
+    .timeline-frame::-webkit-scrollbar {{
+      height: 14px;
+    }}
+    .timeline-frame::-webkit-scrollbar-track {{
+      background: #e2e8f0;
+      border-radius: 999px;
+    }}
+    .timeline-frame::-webkit-scrollbar-thumb {{
+      background: #94a3b8;
+      border-radius: 999px;
+      border: 3px solid #e2e8f0;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="timeline-frame">
+      <div class="timeline-inner">
+        {figure_html}
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+"""
+    output_path.write_text(html, encoding="utf-8")
     return output_path
 
 
