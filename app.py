@@ -27,6 +27,7 @@ DAILY_PATH = PROJECT_ROOT / "data" / "processed" / "daily_oblast_timeseries.csv"
 EVENT_LEVEL_PATH = PROJECT_ROOT / "data" / "processed" / "alerts_merged_event_level.csv"
 FORECAST_PATH = PROJECT_ROOT / "data" / "processed" / "forecast_daily_oblast.csv"
 FORECAST_60D_PATH = PROJECT_ROOT / "data" / "processed" / "forecast_60d_oblast.csv"
+FORECAST_METRICS_PATH = PROJECT_ROOT / "outputs" / "tables" / "forecast_60d_metrics.json"
 EVENTS_PATH = PROJECT_ROOT / "data" / "processed" / "expanded_event_calendar.csv"
 SUMMARY_PATH = PROJECT_ROOT / "outputs" / "tables" / "oblast_summary.csv"
 GEOJSON_PATH = PROJECT_ROOT / "data" / "geo" / "ukraine_adm1_geoboundaries.geojson"
@@ -385,6 +386,13 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
 
     summary = pd.read_csv(SUMMARY_PATH)
     return daily, events, forecast, forecast_60d, event_calendar, summary
+
+@st.cache_data(show_spinner=False)
+def load_metrics() -> dict | None:
+    if FORECAST_METRICS_PATH.exists():
+        with open(FORECAST_METRICS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
 
 def format_number(value: float, digits: int = 0) -> str:
@@ -1671,6 +1679,7 @@ def render_scrollable_plotly(
 def main() -> None:
     inject_css()
     daily, events, forecast, forecast_60d, event_calendar, summary = load_data()
+    metrics = load_metrics()
 
     min_date = daily["date"].min().date()
     max_date = daily["date"].max().date()
@@ -2039,6 +2048,64 @@ def main() -> None:
             use_container_width=True,
             hide_index=True,
         )
+        
+        if metrics and "backtests" in metrics and "metrics_by_model" in metrics["backtests"]:
+            st.markdown(
+                '<div class="section-title">Model comparison (Rolling backtests)</div>',
+                unsafe_allow_html=True,
+            )
+            
+            backtests = metrics["backtests"]["metrics_by_model"]
+            comparison_rows = []
+            for model_name, horizons in backtests.items():
+                for horizon_day, horizon_metrics in horizons.items():
+                    comparison_rows.append({
+                        "Model": model_name,
+                        "Horizon": f"Day {horizon_day}",
+                        "Horizon_Numeric": int(horizon_day),
+                        "Probability MAE": horizon_metrics.get("probability_mae"),
+                        "Count MAE": horizon_metrics.get("count_mae"),
+                        "Minutes MAE": horizon_metrics.get("minutes_mae")
+                    })
+            
+            if comparison_rows:
+                comparison_df = pd.DataFrame(comparison_rows).sort_values(["Horizon_Numeric", "Model"])
+                
+                chart_cols = st.columns([1, 1])
+                with chart_cols[0]:
+                    chart_df = comparison_df[comparison_df["Horizon_Numeric"] == 1]
+                    if not chart_df.empty:
+                        fig = px.bar(
+                            chart_df,
+                            x="Model",
+                            y="Probability MAE",
+                            title="Day-1 Probability Error (MAE)",
+                            color="Model",
+                            text_auto=".3f",
+                        )
+                        fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="MAE (lower is better)")
+                        st.plotly_chart(fig, use_container_width=True, theme=None)
+                
+                with chart_cols[1]:
+                    chart_df_counts = comparison_df[comparison_df["Horizon_Numeric"] == 1]
+                    if not chart_df_counts.empty:
+                        fig2 = px.bar(
+                            chart_df_counts,
+                            x="Model",
+                            y="Count MAE",
+                            title="Day-1 Count Error (MAE)",
+                            color="Model",
+                            text_auto=".2f",
+                        )
+                        fig2.update_layout(showlegend=False, xaxis_title="", yaxis_title="MAE (lower is better)")
+                        st.plotly_chart(fig2, use_container_width=True, theme=None)
+
+                st.markdown("##### Detailed Metrics Table")
+                st.dataframe(
+                    comparison_df.drop("Horizon_Numeric", axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     with timeline_tab:
         st.markdown(
