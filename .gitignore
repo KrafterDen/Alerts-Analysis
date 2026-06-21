@@ -7,6 +7,7 @@ data/raw/*.csv
 data/processed/*.csv
 data/processed/*.json
 data/raw/api_delta/*.json
+!data/processed/expanded_event_calendar.csv
 outputs/figures/*.png
 outputs/tables/*.csv
 !data/raw/.gitkeep

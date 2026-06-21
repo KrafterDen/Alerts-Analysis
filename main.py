@@ -5,6 +5,11 @@ from __future__ import annotations
 import argparse
 
 from src.analyze import print_analysis_summary, run_analysis
+from src.events import (
+    EXPANDED_EVENTS_PATH,
+    build_expanded_event_calendar,
+    print_event_summary,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +28,23 @@ def parse_args() -> argparse.Namespace:
         help='Selected oblast for figures, e.g. "Kyiv Oblast" or "Kyiv City".',
     )
 
+    events = subparsers.add_parser(
+        "events",
+        help="Expand holiday/symbolic-date events into dated event windows.",
+    )
+    events.add_argument(
+        "--window-days-before",
+        type=int,
+        default=3,
+        help="Days before each event date to include. Default: 3.",
+    )
+    events.add_argument(
+        "--window-days-after",
+        type=int,
+        default=3,
+        help="Days after each event date to include. Default: 3.",
+    )
+
     return parser.parse_args()
 
 
@@ -34,9 +56,16 @@ def main() -> int:
         print_analysis_summary(outputs)
         return 0
 
+    if args.command == "events":
+        expanded = build_expanded_event_calendar(
+            window_days_before=args.window_days_before,
+            window_days_after=args.window_days_after,
+        )
+        print_event_summary(expanded, EXPANDED_EVENTS_PATH)
+        return 0
+
     raise ValueError(f"Unsupported command: {args.command}")
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
