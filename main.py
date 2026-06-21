@@ -11,6 +11,7 @@ from src.events import (
     print_event_summary,
 )
 from src.forecast import print_forecast_summary, run_forecast
+from src.timeline_viz import build_and_save_timeline, print_timeline_summary
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +64,22 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of latest dates used for the time-based test split.",
     )
 
+    timeline = subparsers.add_parser(
+        "timeline",
+        help="Build the interactive holiday/event timeline HTML preview.",
+    )
+    timeline.add_argument(
+        "--oblast",
+        default="Kyiv Oblast",
+        help='Selected oblast, e.g. "Kyiv Oblast", "Kyiv City", or "Kharkivska oblast".',
+    )
+    timeline.add_argument(
+        "--activity-metric",
+        choices=["alert_count", "total_alert_minutes"],
+        default="alert_count",
+        help="Historical activity metric for the left axis.",
+    )
+
     return parser.parse_args()
 
 
@@ -85,6 +102,14 @@ def main() -> int:
     if args.command == "forecast":
         result = run_forecast(model_type=args.model, test_size=args.test_size)
         print_forecast_summary(result)
+        return 0
+
+    if args.command == "timeline":
+        _, data, output_path = build_and_save_timeline(
+            oblast=args.oblast,
+            activity_metric=args.activity_metric,
+        )
+        print_timeline_summary(data, output_path)
         return 0
 
     raise ValueError(f"Unsupported command: {args.command}")
