@@ -96,6 +96,13 @@ def inject_css() -> None:
             --muted: #6b7280;
             --alert: #e4574f;
             --blue: #2563eb;
+            --future-bg: #071426;
+            --future-panel: #0d213d;
+            --future-panel-2: #102a4d;
+            --future-border: #214a78;
+            --future-text: #e6f2ff;
+            --future-muted: #9db6d3;
+            --future-blue: #38bdf8;
         }
         .stApp {
             background: var(--page-bg);
@@ -225,6 +232,75 @@ def inject_css() -> None:
             color: var(--muted);
             font-size: 13px;
             margin: 6px 0 12px;
+        }
+        .future-shell {
+            padding: 18px;
+            border: 1px solid var(--future-border);
+            border-radius: 8px;
+            background:
+                linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(228, 87, 79, 0.06)),
+                linear-gradient(180deg, var(--future-bg), #0a1b33);
+            box-shadow: 0 18px 38px rgba(7, 20, 38, 0.22);
+            margin: 6px 0 14px;
+        }
+        .future-kicker {
+            color: var(--future-blue);
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .future-title {
+            color: var(--future-text);
+            font-size: 28px;
+            font-weight: 800;
+            line-height: 1.14;
+            margin-bottom: 4px;
+        }
+        .future-subtitle {
+            color: var(--future-muted);
+            font-size: 13px;
+            margin-bottom: 14px;
+        }
+        .future-card {
+            min-height: 118px;
+            padding: 14px 15px;
+            border: 1px solid rgba(56, 189, 248, 0.22);
+            border-radius: 8px;
+            background: linear-gradient(180deg, var(--future-panel), var(--future-panel-2));
+        }
+        .future-card-label {
+            color: var(--future-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            margin-bottom: 8px;
+        }
+        .future-card-value {
+            color: var(--future-text);
+            font-size: 24px;
+            font-weight: 800;
+            line-height: 1.12;
+        }
+        .future-card-note {
+            color: var(--future-muted);
+            font-size: 12px;
+            margin-top: 7px;
+        }
+        .future-events {
+            color: var(--future-text);
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .future-event-chip {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 999px;
+            margin: 0 5px 5px 0;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
         }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--panel-border);
@@ -795,9 +871,11 @@ def render_control_strip(
 ) -> None:
     st.markdown('<div class="control-strip-title">Dashboard controls</div>', unsafe_allow_html=True)
     with st.container(border=True):
-        region_col, date_col, metric_col, model_col, toggles_col, reset_col = st.columns(
-            [1.35, 1.55, 1.3, 1.35, 1.35, 0.85]
+        mode_col, region_col, date_col, metric_col, model_col, toggles_col, reset_col = st.columns(
+            [0.9, 1.25, 1.45, 1.2, 1.25, 1.25, 0.8]
         )
+        with mode_col:
+            st.toggle("Future mode", key="future_mode")
         with region_col:
             st.markdown(
                 f"""
@@ -1107,12 +1185,17 @@ def build_event_timeline(
     metric: str,
     selected_model: str,
     show_event_windows: bool = True,
+    future_mode: bool = False,
 ) -> go.Figure:
     actual_metric = "alert_count" if metric == "predicted_risk" else metric
-    filtered_daily = filter_daily(daily, oblast, start, end)
+    latest_observed_date = pd.Timestamp(daily["date"].max()).normalize()
+    filtered_daily = filter_daily(daily, oblast, start, min(end, latest_observed_date))
     risk, risk_date = latest_future_risk(forecast, forecast_60d, oblast, selected_model)
     model_rows = selected_forecast_frame(forecast_60d, selected_model)
-    future_model_rows = model_rows[model_rows["oblast_name"].eq(oblast)].copy()
+    future_model_rows = model_rows[
+        model_rows["oblast_name"].eq(oblast)
+        & model_rows["forecast_date"].gt(latest_observed_date)
+    ].copy()
     include_future = not future_model_rows.empty and end >= daily["date"].max().normalize()
 
     timeline = filtered_daily[["date", "oblast_name", "alert_count", "total_alert_minutes"]].copy()
@@ -1145,7 +1228,20 @@ def build_event_timeline(
     else:
         visible_events = event_calendar.iloc[0:0].copy()
     actual = timeline[timeline["has_actual_data"]].copy()
-    activity_max = max(float(actual[actual_metric].max()) if not actual.empty else 1, 1)
+    forecast_column = forecast_metric_column(metric)
+    future_activity_max = 0.0
+    if (
+        include_future
+        and not future_model_rows.empty
+        and metric != "predicted_risk"
+        and forecast_column in future_model_rows.columns
+    ):
+        future_activity_max = float(future_model_rows[forecast_column].max())
+    activity_max = max(
+        float(actual[actual_metric].max()) if not actual.empty else 1,
+        future_activity_max,
+        1,
+    )
     span_days = max(int((pd.Timestamp(chart_end) - pd.Timestamp(chart_start)).days), 1)
     figure_width = min(max(span_days * 6, 1500), 9000)
 
@@ -1206,7 +1302,6 @@ def build_event_timeline(
         secondary_y=False,
     )
 
-    forecast_column = forecast_metric_column(metric)
     if include_future and not future_model_rows.empty:
         future_model_rows = future_model_rows.sort_values("forecast_date")
         future_y = future_model_rows[forecast_column]
@@ -1242,14 +1337,24 @@ def build_event_timeline(
         if risk is not None and risk_date is not None:
             figure.add_shape(
                 type="line",
-                x0=risk_date,
-                x1=risk_date,
+                x0=latest_observed_date,
+                x1=latest_observed_date,
                 y0=0,
                 y1=1,
                 xref="x2",
                 yref="paper",
-                line=dict(color=ALERT_CORAL, width=1.5, dash="dash"),
+                line=dict(color=ALERT_CORAL, width=2.0, dash="dash"),
                 layer="above",
+            )
+            figure.add_annotation(
+                x=latest_observed_date,
+                y=1.02,
+                xref="x2",
+                yref="paper",
+                text="Latest observed data",
+                showarrow=False,
+                font=dict(size=12, color=ALERT_CORAL),
+                xanchor="left",
             )
 
     if not visible_events.empty:
@@ -1341,6 +1446,8 @@ def build_event_timeline(
         showgrid=False,
         visible=(metric == "predicted_risk"),
     )
+    if future_mode:
+        apply_future_figure_style(figure)
     return figure
 
 
@@ -1376,11 +1483,91 @@ def forecast_summary_values(
     )
 
 
+def highest_risk_date(forecast_rows: pd.DataFrame) -> tuple[pd.Timestamp | None, float | None]:
+    rows = forecast_rows[forecast_rows["predicted_alert_probability"].notna()].copy()
+    if rows.empty:
+        return None, None
+    row = rows.sort_values(
+        ["predicted_alert_probability", "forecast_date"],
+        ascending=[False, True],
+    ).iloc[0]
+    return pd.Timestamp(row["forecast_date"]), float(row["predicted_alert_probability"])
+
+
+def active_symbolic_dates(forecast_rows: pd.DataFrame, limit: int = 3) -> tuple[pd.DataFrame, int]:
+    rows = symbolic_dates_frame(forecast_rows)
+    return rows.head(limit), int(len(rows))
+
+
+def symbolic_dates_frame(forecast_rows: pd.DataFrame) -> pd.DataFrame:
+    if forecast_rows.empty:
+        return forecast_rows.iloc[0:0].copy()
+    rows = forecast_rows[
+        forecast_rows["is_event_window"].eq(1)
+        & forecast_rows["event_name"].fillna("").ne("")
+    ].copy()
+    if rows.empty:
+        return rows
+    grouped = (
+        rows.groupby(["event_name", "event_category"], as_index=False)
+        .agg(
+            forecast_date=("forecast_date", "min"),
+            horizon_day=("horizon_day", "min"),
+        )
+        .sort_values(["forecast_date", "event_category", "event_name"])
+        .reset_index(drop=True)
+    )
+    return grouped
+
+
+def render_future_card(label: str, value: str, note: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="future-card">
+          <div class="future-card-label">{label}</div>
+          <div class="future-card-value">{value}</div>
+          <div class="future-card-note">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_future_events_card(events: pd.DataFrame, total_events: int) -> None:
+    if events.empty:
+        content = '<div class="future-card-value">None</div><div class="future-card-note">No symbolic-date windows in horizon</div>'
+    else:
+        rows = []
+        for row in events.itertuples(index=False):
+            color = CATEGORY_COLORS.get(str(row.event_category), "#64748b")
+            date_label = pd.Timestamp(row.forecast_date).strftime("%b %d")
+            rows.append(
+                f'<span class="future-event-chip" style="background:{color};">{date_label}</span>'
+                f'{row.event_name}'
+            )
+        more = f"{total_events} symbolic events in horizon"
+        content = (
+            '<div class="future-events">'
+            + "<br>".join(rows)
+            + f'</div><div class="future-card-note">{more}</div>'
+        )
+    st.markdown(
+        f"""
+        <div class="future-card">
+          <div class="future-card-label">Active symbolic dates</div>
+          {content}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def forecast_curve_chart(
     forecast_60d: pd.DataFrame,
     oblast: str,
     selected_model: str,
     metric: str,
+    future_mode: bool = False,
 ) -> go.Figure:
     rows = selected_forecast_frame(forecast_60d, selected_model)
     rows = rows[rows["oblast_name"].eq(oblast)].copy()
@@ -1422,13 +1609,35 @@ def forecast_curve_chart(
         f"60-day forecast path: {selected_model}",
         forecast_metric_label(metric),
     )
+    if future_mode:
+        apply_future_figure_style(figure)
     if metric == "predicted_risk":
         figure.update_yaxes(tickformat=".0%", range=[0, 1])
     return figure
 
 
-def render_scrollable_plotly(figure: go.Figure, height: int = 810) -> None:
+def apply_future_figure_style(figure: go.Figure) -> go.Figure:
+    figure.update_layout(
+        paper_bgcolor="#071426",
+        plot_bgcolor="#0a1b33",
+        font=dict(family="Arial, sans-serif", color="#e6f2ff"),
+        title=dict(font=dict(color="#e6f2ff")),
+        legend=dict(font=dict(color="#e6f2ff")),
+    )
+    figure.update_xaxes(gridcolor="#17365f", linecolor="#2d5b8e", color="#cfe6ff")
+    figure.update_yaxes(gridcolor="#17365f", linecolor="#2d5b8e", color="#cfe6ff")
+    return figure
+
+
+def render_scrollable_plotly(
+    figure: go.Figure,
+    height: int = 810,
+    *,
+    future_mode: bool = False,
+) -> None:
     figure_width = int(figure.layout.width or 1600)
+    background = "#071426" if future_mode else "#fffdf8"
+    border = "#214a78" if future_mode else "#ded6c9"
     html = pio.to_html(
         figure,
         include_plotlyjs=True,
@@ -1447,8 +1656,8 @@ def render_scrollable_plotly(figure: go.Figure, height: int = 810) -> None:
     )
     components.html(
         f"""
-        <div style="width:100%; overflow-x:auto; overflow-y:hidden; background:#fffdf8;
-                    border:1px solid #ded6c9; border-radius:8px; padding:6px;">
+        <div style="width:100%; overflow-x:auto; overflow-y:hidden; background:{background};
+                    border:1px solid {border}; border-radius:8px; padding:6px;">
           <div style="width:{figure_width}px; min-width:{figure_width}px;">
             {html}
           </div>
@@ -1473,6 +1682,7 @@ def main() -> None:
     st.session_state.setdefault("selected_metric", "alert_count")
     st.session_state.setdefault("show_event_windows", True)
     st.session_state.setdefault("show_rolling_average", True)
+    st.session_state.setdefault("future_mode", False)
     model_options = available_forecast_models(forecast_60d)
     default_model = model_options[0] if model_options else "Baseline next-day risk"
     st.session_state.setdefault("selected_model", default_model)
@@ -1489,6 +1699,7 @@ def main() -> None:
     if start_date > end_date:
         start_date, end_date = end_date, start_date
     metric = st.session_state["selected_metric"]
+    map_metric = "predicted_risk" if st.session_state["future_mode"] else metric
 
     selected_oblast = st.session_state["selected_oblast"]
     latest_data_date = daily["date"].max()
@@ -1507,7 +1718,7 @@ def main() -> None:
         daily=daily,
         forecast=forecast,
         forecast_60d=forecast_60d,
-        metric=metric,
+        metric=map_metric,
         start=start_date,
         end=end_date,
         selected_oblast=selected_oblast,
@@ -1527,6 +1738,7 @@ def main() -> None:
     if start_date > end_date:
         start_date, end_date = end_date, start_date
     metric = st.session_state["selected_metric"]
+    future_mode = st.session_state["future_mode"]
     selected_oblast = st.session_state["selected_oblast"]
     selected_model = st.session_state["selected_model"]
     filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
@@ -1632,52 +1844,124 @@ def main() -> None:
         )
 
     with forecast_tab:
-        st.markdown(
-            '<div class="section-title">Forecast view</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            """
-            <div class="tab-panel-note">
-            Current output shows exploratory 60-day expected values and next-day risk
-            from the selected forecast model. These values are analytical comparisons only,
-            not operational prediction.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         forecast_rows, forecast_count_sum, forecast_minutes_sum = forecast_summary_values(
             forecast_60d,
             selected_oblast,
             selected_model,
         )
-        forecast_cols = st.columns(5)
-        with forecast_cols[0]:
-            metric_card(
-                "Next-day risk",
-                format_probability(risk),
-                f"{risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
+        highest_date, highest_probability = highest_risk_date(forecast_rows)
+        symbolic_events, total_symbolic_events = active_symbolic_dates(forecast_rows)
+        if future_mode:
+            st.markdown(
+                f"""
+                <div class="future-shell">
+                  <div class="future-kicker">Future mode</div>
+                  <div class="future-title">View Into The Future: {selected_oblast}</div>
+                  <div class="future-subtitle">
+                    {selected_model} forecast horizon. Exploratory comparison only, not operational prediction.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        with forecast_cols[1]:
-            metric_card("Model", selected_model, "Selected forecast path")
-        with forecast_cols[2]:
-            metric_card(
-                "60-day alert count",
-                format_number(forecast_count_sum or 0, 1),
-                "Expected sum",
+            forecast_cols = st.columns(5)
+            with forecast_cols[0]:
+                render_future_card(
+                    "Next-day probability",
+                    format_probability(risk),
+                    f"{risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
+                )
+            with forecast_cols[1]:
+                render_future_card(
+                    "Predicted alerts",
+                    format_number(forecast_count_sum or 0, 1),
+                    "Expected over 60 days",
+                )
+            with forecast_cols[2]:
+                render_future_card(
+                    "Predicted minutes",
+                    format_number(forecast_minutes_sum or 0, 1),
+                    f"{(forecast_minutes_sum or 0) / 60:,.1f} hours",
+                )
+            with forecast_cols[3]:
+                render_future_card(
+                    "Highest-risk date",
+                    f"{highest_date:%Y-%m-%d}" if highest_date is not None else "n/a",
+                    format_probability(highest_probability),
+                )
+            with forecast_cols[4]:
+                render_future_events_card(symbolic_events, total_symbolic_events)
+        else:
+            st.markdown(
+                '<div class="section-title">Forecast view</div>',
+                unsafe_allow_html=True,
             )
-        with forecast_cols[3]:
-            metric_card(
-                "60-day alert hours",
-                format_number((forecast_minutes_sum or 0) / 60, 1),
-                "Expected sum",
+            st.markdown(
+                """
+                <div class="tab-panel-note">
+                Current output shows exploratory 60-day expected values and next-day risk
+                from the selected forecast model. These values are analytical comparisons only,
+                not operational prediction.
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        with forecast_cols[4]:
-            metric_card(
-                "Forecast horizon",
-                f"{int(forecast_rows['horizon_day'].max())} days" if not forecast_rows.empty else "n/a",
-                "Future-only window",
-            )
+            forecast_cols = st.columns(5)
+            with forecast_cols[0]:
+                metric_card(
+                    "Next-day risk",
+                    format_probability(risk),
+                    f"{risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
+                )
+            with forecast_cols[1]:
+                metric_card(
+                    "60-day alerts",
+                    format_number(forecast_count_sum or 0, 1),
+                    "Expected sum",
+                )
+            with forecast_cols[2]:
+                metric_card(
+                    "60-day minutes",
+                    format_number(forecast_minutes_sum or 0, 1),
+                    f"{(forecast_minutes_sum or 0) / 60:,.1f} hours",
+                )
+            with forecast_cols[3]:
+                metric_card(
+                    "Highest-risk date",
+                    f"{highest_date:%Y-%m-%d}" if highest_date is not None else "n/a",
+                    format_probability(highest_probability),
+                )
+            with forecast_cols[4]:
+                metric_card(
+                    "Symbolic dates",
+                    str(total_symbolic_events),
+                    "Event-window dates",
+                )
+
+        st.markdown(
+            '<div class="section-title">Future timeline</div>'
+            if not future_mode
+            else '<div class="future-kicker">Timeline</div>',
+            unsafe_allow_html=True,
+        )
+        timeline_preview = build_event_timeline(
+            daily,
+            forecast,
+            forecast_60d,
+            event_calendar,
+            selected_oblast,
+            start_date,
+            end_date,
+            metric,
+            selected_model,
+            show_event_windows=st.session_state["show_event_windows"],
+            future_mode=future_mode,
+        )
+        render_scrollable_plotly(
+            timeline_preview,
+            height=810,
+            future_mode=future_mode,
+        )
 
         st.plotly_chart(
             forecast_curve_chart(
@@ -1685,10 +1969,25 @@ def main() -> None:
                 selected_oblast,
                 selected_model,
                 metric,
+                future_mode=future_mode,
             ),
             use_container_width=True,
             theme=None,
         )
+
+        if total_symbolic_events:
+            all_symbolic_events = symbolic_dates_frame(forecast_rows)
+            event_table = all_symbolic_events[
+                ["forecast_date", "event_name", "event_category", "horizon_day"]
+            ].rename(
+                columns={
+                    "forecast_date": "Window starts",
+                    "event_name": "Event",
+                    "event_category": "Category",
+                    "horizon_day": "Horizon day",
+                }
+            )
+            st.dataframe(event_table, use_container_width=True, hide_index=True)
 
         future_rows = forecast_rows.copy()
         if future_rows.empty:
