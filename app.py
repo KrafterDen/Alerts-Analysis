@@ -195,6 +195,36 @@ def inject_css() -> None:
             font-size: 12px;
             margin-top: 6px;
         }
+        .control-strip {
+            padding: 12px 14px;
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            background: var(--panel-bg);
+            box-shadow: 0 1px 2px rgba(23, 32, 51, 0.06);
+            margin: 10px 0 16px 0;
+        }
+        .control-strip-title {
+            color: var(--muted);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            margin-bottom: 4px;
+        }
+        .control-strip-region {
+            color: var(--text-dark);
+            font-size: 21px;
+            font-weight: 800;
+            line-height: 1.2;
+        }
+        .tab-panel-note {
+            padding: 10px 12px;
+            border: 1px dashed var(--panel-border);
+            border-radius: 8px;
+            background: #fff9ee;
+            color: var(--muted);
+            font-size: 13px;
+            margin: 6px 0 12px;
+        }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--panel-border);
             border-radius: 8px;
@@ -668,6 +698,77 @@ def render_oblast_map(
     st.caption(GEOBOUNDARIES_ATTRIBUTION)
 
 
+def render_control_strip(
+    *,
+    oblasts: list[str],
+    default_oblast: str,
+    min_date: date,
+    max_date: date,
+) -> None:
+    st.markdown('<div class="control-strip-title">Dashboard controls</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        region_col, date_col, metric_col, model_col, toggles_col, reset_col = st.columns(
+            [1.35, 1.55, 1.3, 1.35, 1.35, 0.85]
+        )
+        with region_col:
+            st.markdown(
+                f"""
+                <div class="control-strip-region">{st.session_state["selected_oblast"]}</div>
+                <div class="metric-note">Selected by map click</div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with date_col:
+            st.date_input(
+                "Date range",
+                value=st.session_state["date_range"],
+                min_value=min_date,
+                max_value=max_date,
+                key="date_range",
+            )
+        with metric_col:
+            st.selectbox(
+                "Map/chart metric",
+                options=list(METRIC_OPTIONS.keys()),
+                format_func=METRIC_OPTIONS.get,
+                key="selected_metric",
+            )
+        with model_col:
+            st.selectbox(
+                "Forecast model",
+                options=[
+                    "Baseline next-day risk",
+                    "60-day baseline planned",
+                    "LSTM planned",
+                ],
+                key="selected_model",
+                disabled=True,
+            )
+        with toggles_col:
+            st.toggle("Show event windows", key="show_event_windows")
+            st.toggle("Show rolling average", key="show_rolling_average")
+        with reset_col:
+            st.write("")
+            st.write("")
+            if st.button("Reset region", use_container_width=True):
+                st.session_state["selected_oblast"] = default_oblast
+                st.session_state.pop("map_notice", None)
+                st.rerun()
+
+    with st.sidebar.expander("Fallback region selector / debug"):
+        fallback_oblast = st.selectbox(
+            "Oblast",
+            oblasts,
+            index=oblasts.index(st.session_state["selected_oblast"]),
+            key="fallback_oblast",
+        )
+        if fallback_oblast != st.session_state["selected_oblast"]:
+            st.session_state["selected_oblast"] = fallback_oblast
+            st.session_state.pop("map_notice", None)
+            st.rerun()
+        st.caption(GEOBOUNDARIES_ATTRIBUTION)
+
+
 def most_active_day(filtered_daily: pd.DataFrame) -> str:
     if filtered_daily.empty or filtered_daily["alert_count"].sum() == 0:
         return "n/a"
@@ -749,7 +850,11 @@ def base_figure_layout(figure: go.Figure, title: str, y_title: str = "") -> go.F
     return figure
 
 
-def daily_activity_chart(filtered_daily: pd.DataFrame, metric: str) -> go.Figure:
+def daily_activity_chart(
+    filtered_daily: pd.DataFrame,
+    metric: str,
+    show_rolling_average: bool = False,
+) -> go.Figure:
     actual_metric = "alert_count" if metric == "predicted_risk" else metric
     title = f"{METRIC_OPTIONS[actual_metric]} over time"
     figure = go.Figure()
@@ -768,6 +873,24 @@ def daily_activity_chart(filtered_daily: pd.DataFrame, metric: str) -> go.Figure
             ),
         )
     )
+    if show_rolling_average:
+        rolling = filtered_daily[["date", actual_metric]].copy()
+        rolling["rolling_7d"] = rolling[actual_metric].rolling(
+            7, min_periods=1
+        ).mean()
+        figure.add_trace(
+            go.Scatter(
+                x=rolling["date"],
+                y=rolling["rolling_7d"],
+                mode="lines",
+                name="7-day rolling average",
+                line=dict(color=ALERT_CORAL, width=2.2),
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    "7-day average: %{y:,.2f}<extra></extra>"
+                ),
+            )
+        )
     return base_figure_layout(figure, title, METRIC_OPTIONS[actual_metric])
 
 
@@ -885,6 +1008,7 @@ def build_event_timeline(
     start: pd.Timestamp,
     end: pd.Timestamp,
     metric: str,
+    show_event_windows: bool = True,
 ) -> go.Figure:
     actual_metric = "alert_count" if metric == "predicted_risk" else metric
     filtered_daily = filter_daily(daily, oblast, start, end)
@@ -912,9 +1036,12 @@ def build_event_timeline(
 
     chart_start = timeline["date"].min() if not timeline.empty else start
     chart_end = timeline["date"].max() if not timeline.empty else end
-    visible_events = event_calendar[
-        event_calendar["event_date"].between(chart_start, chart_end)
-    ].copy()
+    if show_event_windows:
+        visible_events = event_calendar[
+            event_calendar["event_date"].between(chart_start, chart_end)
+        ].copy()
+    else:
+        visible_events = event_calendar.iloc[0:0].copy()
     actual = timeline[timeline["has_actual_data"]].copy()
     activity_max = max(float(actual[actual_metric].max()) if not actual.empty else 1, 1)
     span_days = max(int((pd.Timestamp(chart_end) - pd.Timestamp(chart_start)).days), 1)
@@ -1148,40 +1275,24 @@ def main() -> None:
     default_oblast = "Kyivska oblast" if "Kyivska oblast" in oblasts else oblasts[0]
     if st.session_state.get("selected_oblast") not in oblasts:
         st.session_state["selected_oblast"] = default_oblast
+    st.session_state.setdefault("date_range", (min_date, max_date))
+    st.session_state.setdefault("selected_metric", "alert_count")
+    st.session_state.setdefault("show_event_windows", True)
+    st.session_state.setdefault("show_rolling_average", True)
+    st.session_state.setdefault("selected_model", "Baseline next-day risk")
 
     with st.sidebar:
-        st.header("Filters")
-        selected_range = st.date_input(
-            "Date range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
-        metric = st.selectbox(
-            "Metric",
-            options=list(METRIC_OPTIONS.keys()),
-            format_func=METRIC_OPTIONS.get,
-        )
-        with st.expander("Fallback region selector / debug"):
-            fallback_oblast = st.selectbox(
-                "Oblast",
-                oblasts,
-                index=oblasts.index(st.session_state["selected_oblast"]),
-            )
-            if fallback_oblast != st.session_state["selected_oblast"]:
-                st.session_state["selected_oblast"] = fallback_oblast
-                st.session_state.pop("map_notice", None)
-                st.rerun()
-            st.caption(GEOBOUNDARIES_ATTRIBUTION)
+        st.header("Fallback and sources")
+        st.caption("Primary region selection is the map at the top of the dashboard.")
 
-    start_date, end_date = normalize_date_range(selected_range, min_date, max_date)
+    start_date, end_date = normalize_date_range(
+        st.session_state["date_range"], min_date, max_date
+    )
     if start_date > end_date:
         start_date, end_date = end_date, start_date
+    metric = st.session_state["selected_metric"]
 
     selected_oblast = st.session_state["selected_oblast"]
-    filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
-    filtered_events = filter_event_level(events, selected_oblast, start_date, end_date)
-    risk, risk_date = latest_future_risk(forecast, selected_oblast)
     latest_data_date = daily["date"].max()
 
     st.markdown(
@@ -1202,6 +1313,19 @@ def main() -> None:
         end=end_date,
         selected_oblast=selected_oblast,
     )
+    render_control_strip(
+        oblasts=oblasts,
+        default_oblast=default_oblast,
+        min_date=min_date,
+        max_date=max_date,
+    )
+
+    start_date, end_date = normalize_date_range(
+        st.session_state["date_range"], min_date, max_date
+    )
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    metric = st.session_state["selected_metric"]
     selected_oblast = st.session_state["selected_oblast"]
     filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
     filtered_events = filter_event_level(events, selected_oblast, start_date, end_date)
@@ -1214,65 +1338,184 @@ def main() -> None:
     total_alerts = float(filtered_daily["alert_count"].sum())
     total_minutes = float(filtered_daily["total_alert_minutes"].sum())
     avg_duration = total_minutes / total_alerts if total_alerts else 0
-
-    card_cols = st.columns(6)
-    with card_cols[0]:
-        metric_card("Total alerts", format_number(total_alerts), "Selected range")
-    with card_cols[1]:
-        metric_card("Alert hours", format_number(total_minutes / 60, 1), "Selected range")
-    with card_cols[2]:
-        metric_card("Average duration", f"{avg_duration:.1f} min", "Weighted by alerts")
-    with card_cols[3]:
-        metric_card("Most active day", most_active_day(filtered_daily), "By alert count")
-    with card_cols[4]:
-        metric_card("Latest data date", f"{latest_data_date:%Y-%m-%d}", "Daily data")
-    with card_cols[5]:
-        metric_card(
-            "Next-day risk",
-            format_probability(risk),
-            f"Forecast date {risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
-        )
-
-    st.markdown('<div class="section-title">Regional overview</div>', unsafe_allow_html=True)
     regional_table = build_regional_table(daily, forecast, summary, metric)
-    st.dataframe(regional_table, use_container_width=True, hide_index=True)
 
-    st.markdown('<div class="section-title">Alert activity</div>', unsafe_allow_html=True)
-    top_left, top_right = st.columns(2)
-    with top_left:
-        st.plotly_chart(
-            daily_activity_chart(filtered_daily, metric),
-            use_container_width=True,
-            theme=None,
-        )
-    with top_right:
-        st.plotly_chart(
-            rolling_average_chart(filtered_daily, metric),
-            use_container_width=True,
-            theme=None,
-        )
+    overview_tab, historical_tab, forecast_tab, timeline_tab, data_tab = st.tabs(
+        ["Overview", "Historical", "Forecast", "Events timeline", "Data"]
+    )
 
-    bottom_left, bottom_right = st.columns(2)
-    with bottom_left:
-        st.plotly_chart(day_of_week_chart(filtered_daily), use_container_width=True, theme=None)
-    with bottom_right:
+    with overview_tab:
+        card_cols = st.columns(6)
+        with card_cols[0]:
+            metric_card("Total alerts", format_number(total_alerts), "Selected range")
+        with card_cols[1]:
+            metric_card(
+                "Alert hours",
+                format_number(total_minutes / 60, 1),
+                "Selected range",
+            )
+        with card_cols[2]:
+            metric_card(
+                "Average duration",
+                f"{avg_duration:.1f} min",
+                "Weighted by alerts",
+            )
+        with card_cols[3]:
+            metric_card(
+                "Most active day",
+                most_active_day(filtered_daily),
+                "By alert count",
+            )
+        with card_cols[4]:
+            metric_card("Latest data date", f"{latest_data_date:%Y-%m-%d}", "Daily data")
+        with card_cols[5]:
+            metric_card(
+                "Next-day risk",
+                format_probability(risk),
+                f"Forecast date {risk_date:%Y-%m-%d}"
+                if risk_date is not None
+                else "Unavailable",
+            )
+
+        st.markdown(
+            '<div class="section-title">Regional overview</div>',
+            unsafe_allow_html=True,
+        )
+        st.dataframe(regional_table, use_container_width=True, hide_index=True)
+
+    with historical_tab:
+        st.markdown(
+            '<div class="section-title">Historical alert activity</div>',
+            unsafe_allow_html=True,
+        )
+        left_chart, right_chart = st.columns([1.45, 1.0])
+        with left_chart:
+            st.plotly_chart(
+                daily_activity_chart(
+                    filtered_daily,
+                    metric,
+                    show_rolling_average=st.session_state["show_rolling_average"],
+                ),
+                use_container_width=True,
+                theme=None,
+            )
+        with right_chart:
+            st.plotly_chart(
+                day_of_week_chart(filtered_daily),
+                use_container_width=True,
+                theme=None,
+            )
+        if st.session_state["show_rolling_average"]:
+            st.plotly_chart(
+                rolling_average_chart(filtered_daily, metric),
+                use_container_width=True,
+                theme=None,
+            )
         st.plotly_chart(
             duration_distribution_chart(filtered_events),
             use_container_width=True,
             theme=None,
         )
 
-    st.markdown('<div class="section-title">Holiday and symbolic-date timeline</div>', unsafe_allow_html=True)
-    timeline_figure = build_event_timeline(
-        daily,
-        forecast,
-        event_calendar,
-        selected_oblast,
-        start_date,
-        end_date,
-        metric,
-    )
-    render_scrollable_plotly(timeline_figure)
+    with forecast_tab:
+        st.markdown(
+            '<div class="section-title">Forecast view</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            <div class="tab-panel-note">
+            Current output is the real baseline next-day alert probability. The
+            60-day count/minutes forecast and LSTM model selector are planned for
+            the next forecasting stage, so no synthetic 60-day values are shown here.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        forecast_cols = st.columns(5)
+        with forecast_cols[0]:
+            metric_card(
+                "Next-day risk",
+                format_probability(risk),
+                f"{risk_date:%Y-%m-%d}" if risk_date is not None else "Unavailable",
+            )
+        with forecast_cols[1]:
+            metric_card("Model", "Baseline", "Current available model")
+        with forecast_cols[2]:
+            metric_card("60-day alert count", "Planned", "Next stage")
+        with forecast_cols[3]:
+            metric_card("60-day alert minutes", "Planned", "Next stage")
+        with forecast_cols[4]:
+            metric_card("LSTM model", "Planned", "Python 3.12 if needed")
+
+        future_rows = forecast[
+            forecast["split"].eq("future")
+            & forecast["model_probability"].notna()
+        ].copy()
+        future_rows = future_rows.sort_values(
+            "forecast_date"
+        ).drop_duplicates("oblast_name", keep="last")
+        future_rows["next_day_risk"] = future_rows["model_probability"].map(
+            format_probability
+        )
+        st.dataframe(
+            future_rows[
+                ["oblast_name", "forecast_date", "next_day_risk", "model_prediction"]
+            ].rename(
+                columns={
+                    "oblast_name": "Oblast",
+                    "forecast_date": "Forecast date",
+                    "next_day_risk": "Next-day risk",
+                    "model_prediction": "Baseline class",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with timeline_tab:
+        st.markdown(
+            '<div class="section-title">Holiday and symbolic-date timeline</div>',
+            unsafe_allow_html=True,
+        )
+        if not st.session_state["show_event_windows"]:
+            st.markdown(
+                '<div class="tab-panel-note">Event windows are hidden by the control strip toggle.</div>',
+                unsafe_allow_html=True,
+            )
+        timeline_figure = build_event_timeline(
+            daily,
+            forecast,
+            event_calendar,
+            selected_oblast,
+            start_date,
+            end_date,
+            metric,
+            show_event_windows=st.session_state["show_event_windows"],
+        )
+        render_scrollable_plotly(timeline_figure)
+
+    with data_tab:
+        st.markdown('<div class="section-title">Filtered daily data</div>', unsafe_allow_html=True)
+        st.dataframe(filtered_daily, use_container_width=True, hide_index=True)
+        st.markdown('<div class="section-title">Filtered event-level alerts</div>', unsafe_allow_html=True)
+        event_columns = [
+            "source_record_id",
+            "data_source",
+            "oblast_name",
+            "raion_name",
+            "location_type",
+            "alert_type",
+            "started_at_utc",
+            "finished_at_utc",
+            "duration_minutes",
+            "is_finished",
+        ]
+        st.dataframe(
+            filtered_events[event_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 if __name__ == "__main__":
