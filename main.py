@@ -10,6 +10,7 @@ from src.events import (
     build_expanded_event_calendar,
     print_event_summary,
 )
+from src.forecast import print_forecast_summary, run_forecast
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +46,23 @@ def parse_args() -> argparse.Namespace:
         help="Days after each event date to include. Default: 3.",
     )
 
+    forecast = subparsers.add_parser(
+        "forecast",
+        help="Run exploratory next-day alert-risk baseline models.",
+    )
+    forecast.add_argument(
+        "--model",
+        choices=["logistic_regression", "random_forest"],
+        default="logistic_regression",
+        help="Simple sklearn model to train. Default: logistic_regression.",
+    )
+    forecast.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Fraction of latest dates used for the time-based test split.",
+    )
+
     return parser.parse_args()
 
 
@@ -62,6 +80,11 @@ def main() -> int:
             window_days_after=args.window_days_after,
         )
         print_event_summary(expanded, EXPANDED_EVENTS_PATH)
+        return 0
+
+    if args.command == "forecast":
+        result = run_forecast(model_type=args.model, test_size=args.test_size)
+        print_forecast_summary(result)
         return 0
 
     raise ValueError(f"Unsupported command: {args.command}")
