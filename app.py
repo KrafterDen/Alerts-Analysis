@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -27,6 +28,10 @@ EVENT_LEVEL_PATH = PROJECT_ROOT / "data" / "processed" / "alerts_merged_event_le
 FORECAST_PATH = PROJECT_ROOT / "data" / "processed" / "forecast_daily_oblast.csv"
 EVENTS_PATH = PROJECT_ROOT / "data" / "processed" / "expanded_event_calendar.csv"
 SUMMARY_PATH = PROJECT_ROOT / "outputs" / "tables" / "oblast_summary.csv"
+GEOJSON_PATH = PROJECT_ROOT / "data" / "geo" / "ukraine_adm1_geoboundaries.geojson"
+GEOBOUNDARIES_ATTRIBUTION = (
+    "Boundary source: geoBoundaries Global Database, Ukraine ADM1, CC BY 4.0."
+)
 
 METRIC_OPTIONS = {
     "alert_count": "Daily alert count",
@@ -38,6 +43,37 @@ PLOT_TEMPLATE = "plotly_white"
 ALERT_CORAL = "#e4574f"
 UKRAINE_BLUE = "#2563eb"
 TEXT_DARK = "#172033"
+NO_DATA_GRAY = "#d1d5db"
+
+MAP_NAME_TO_OBLAST = {
+    "Autonomous Republic of Crimea": None,
+    "Cherkasy Oblast": "Cherkaska oblast",
+    "Chernihiv Oblast": "Chernihivska oblast",
+    "Chernivtsi Oblast": "Chernivetska oblast",
+    "Dnipropetrovsk Oblast": "Dnipropetrovska oblast",
+    "Donetsk Oblast": "Donetska oblast",
+    "Ivano-Frankivsk Oblast": "Ivano-Frankivska oblast",
+    "Kharkiv Oblast": "Kharkivska oblast",
+    "Kherson Oblast": "Khersonska oblast",
+    "Khmelnytskyi Oblast": "Khmelnytska oblast",
+    "Kirovohrad Oblast": "Kirovohradska oblast",
+    "Kyiv": "Kyiv City",
+    "Kyiv Oblast": "Kyivska oblast",
+    "Luhansk Oblast": "Luhanska oblast",
+    "Lviv Oblast": "Lvivska oblast",
+    "Mykolaiv Oblast": "Mykolaivska oblast",
+    "Odessa Oblast": "Odeska oblast",
+    "Poltava Oblast": "Poltavska oblast",
+    "Rivne Oblast": "Rivnenska oblast",
+    "Sevastopol": None,
+    "Sumy Oblast": "Sumska oblast",
+    "Ternopil Oblast": "Ternopilska oblast",
+    "Vinnytsia Oblast": "Vinnytska oblast",
+    "Volyn Oblast": "Volynska oblast",
+    "Zakarpattia Oblast": "Zakarpatska oblast",
+    "Zaporizhia Oblast": "Zaporizka oblast",
+    "Zhytomyr Oblast": "Zhytomyrska oblast",
+}
 
 
 st.set_page_config(
@@ -121,6 +157,44 @@ def inject_css() -> None:
             font-weight: 700;
             margin: 8px 0 8px 0;
         }
+        .map-panel {
+            padding: 14px 16px 4px;
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            background: var(--panel-bg);
+            box-shadow: 0 1px 2px rgba(23, 32, 51, 0.06);
+            margin-bottom: 16px;
+        }
+        .map-panel-title {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: baseline;
+            margin-bottom: 4px;
+        }
+        .map-panel-title strong {
+            font-size: 20px;
+            color: var(--text-dark);
+        }
+        .map-panel-title span {
+            font-size: 13px;
+            color: var(--muted);
+        }
+        .selected-region-pill {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 999px;
+            background: #e0ecff;
+            color: #1d4ed8;
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .source-note {
+            color: var(--muted);
+            font-size: 12px;
+            margin-top: 6px;
+        }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--panel-border);
             border-radius: 8px;
@@ -185,6 +259,34 @@ def format_probability(value: float | None) -> str:
     return f"{value:.1%}"
 
 
+@st.cache_data(show_spinner=False)
+def load_ukraine_geojson() -> dict:
+    if not GEOJSON_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing Ukraine GeoJSON file: {GEOJSON_PATH}. "
+            "Download geoBoundaries ADM1 before running the dashboard."
+        )
+    geojson = json.loads(GEOJSON_PATH.read_text(encoding="utf-8"))
+    return reverse_geojson_ring_winding(geojson)
+
+
+def reverse_geojson_ring_winding(geojson: dict) -> dict:
+    """Reverse rings so geoBoundaries polygons render as interiors in Plotly."""
+
+    for feature in geojson.get("features", []):
+        geometry = feature.get("geometry", {})
+        if geometry.get("type") == "Polygon":
+            geometry["coordinates"] = [
+                list(reversed(ring)) for ring in geometry.get("coordinates", [])
+            ]
+        elif geometry.get("type") == "MultiPolygon":
+            geometry["coordinates"] = [
+                [list(reversed(ring)) for ring in polygon]
+                for polygon in geometry.get("coordinates", [])
+            ]
+    return geojson
+
+
 def metric_card(label: str, value: str, note: str = "") -> None:
     st.markdown(
         f"""
@@ -246,6 +348,324 @@ def latest_future_risk(forecast: pd.DataFrame, oblast: str) -> tuple[float | Non
         return None, None
     latest = rows.iloc[-1]
     return float(latest["model_probability"]), pd.Timestamp(latest["forecast_date"])
+
+
+def build_map_metric_table(
+    daily: pd.DataFrame,
+    forecast: pd.DataFrame,
+    geojson: dict,
+    metric: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[pd.DataFrame, str]:
+    features = []
+    for feature in geojson.get("features", []):
+        properties = feature.get("properties", {})
+        shape_name = str(properties.get("shapeName", ""))
+        features.append(
+            {
+                "shape_name": shape_name,
+                "shape_iso": properties.get("shapeISO", ""),
+                "oblast_name": MAP_NAME_TO_OBLAST.get(shape_name),
+            }
+        )
+    map_df = pd.DataFrame(features)
+
+    if metric == "predicted_risk":
+        future = forecast[forecast["split"].eq("future")].copy()
+        future = future.sort_values("forecast_date").drop_duplicates(
+            subset=["oblast_name"], keep="last"
+        )
+        values = future[["oblast_name", "model_probability", "forecast_date"]].rename(
+            columns={"model_probability": "metric_value"}
+        )
+        reference_date = values["forecast_date"].dropna().max()
+        reference_label = (
+            f"Forecast date {reference_date:%Y-%m-%d}"
+            if pd.notna(reference_date)
+            else "Forecast date unavailable"
+        )
+    else:
+        filtered = daily[daily["date"].between(start, end)].copy()
+        values = (
+            filtered.groupby("oblast_name", as_index=False)[metric]
+            .sum()
+            .rename(columns={metric: "metric_value"})
+        )
+        reference_label = f"{start:%Y-%m-%d} to {end:%Y-%m-%d}"
+
+    map_df = map_df.merge(values, on="oblast_name", how="left")
+    map_df["has_dataset_match"] = map_df["oblast_name"].notna()
+    map_df["has_metric_value"] = map_df["metric_value"].notna()
+    map_df["metric_value"] = pd.to_numeric(map_df["metric_value"], errors="coerce")
+    map_df["dataset_label"] = map_df["oblast_name"].fillna("No data in current dataset")
+    map_df["reference_label"] = reference_label
+
+    if metric == "predicted_risk":
+        map_df["metric_display"] = map_df["metric_value"].map(format_probability)
+    elif metric == "total_alert_minutes":
+        map_df["metric_display"] = map_df["metric_value"].map(
+            lambda value: "n/a"
+            if pd.isna(value)
+            else f"{value:,.1f} minutes ({value / 60:,.1f} hours)"
+        )
+    else:
+        map_df["metric_display"] = map_df["metric_value"].map(
+            lambda value: "n/a" if pd.isna(value) else f"{value:,.0f}"
+        )
+
+    return map_df, reference_label
+
+
+def build_oblast_map_figure(
+    map_df: pd.DataFrame,
+    geojson: dict,
+    metric: str,
+    selected_oblast: str,
+    reference_label: str,
+) -> go.Figure:
+    metric_label = METRIC_OPTIONS[metric]
+    data_rows = map_df[map_df["has_metric_value"]].copy()
+    no_data_rows = map_df[~map_df["has_metric_value"]].copy()
+
+    if metric == "predicted_risk":
+        colorscale = [
+            [0.0, "#fff1f2"],
+            [0.45, "#fb7185"],
+            [0.75, "#ef4444"],
+            [1.0, "#7f1d1d"],
+        ]
+        zmin, zmax = 0, 1
+        colorbar_title = "Risk"
+        tickformat = ".0%"
+    else:
+        colorscale = [
+            [0.0, "#f8efe1"],
+            [0.35, "#f4b8a7"],
+            [0.70, "#e66b61"],
+            [1.0, "#b91c1c"],
+        ]
+        zmin = 0
+        zmax = max(float(data_rows["metric_value"].max()), 1.0) if not data_rows.empty else 1
+        colorbar_title = metric_label
+        tickformat = None
+
+    figure = go.Figure()
+    if not no_data_rows.empty:
+        figure.add_trace(
+            go.Choropleth(
+                geojson=geojson,
+                featureidkey="properties.shapeName",
+                locations=no_data_rows["shape_name"],
+                z=[0] * len(no_data_rows),
+                colorscale=[[0, NO_DATA_GRAY], [1, NO_DATA_GRAY]],
+                showscale=False,
+                marker=dict(line=dict(color="#fffdf8", width=1.0)),
+                customdata=no_data_rows[
+                    [
+                        "shape_name",
+                        "dataset_label",
+                        "has_dataset_match",
+                        "metric_display",
+                        "reference_label",
+                    ]
+                ].to_numpy(),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Dataset region: %{customdata[1]}<br>"
+                    "Metric: no data<br>"
+                    "Reference: %{customdata[4]}<extra></extra>"
+                ),
+                name="No data",
+            )
+        )
+
+    selectedpoints = None
+    if selected_oblast in set(data_rows["oblast_name"]):
+        selectedpoints = data_rows.index[data_rows["oblast_name"].eq(selected_oblast)]
+        selectedpoints = [
+            int(data_rows.index.get_loc(index_value)) for index_value in selectedpoints
+        ]
+
+    figure.add_trace(
+        go.Choropleth(
+            geojson=geojson,
+            featureidkey="properties.shapeName",
+            locations=data_rows["shape_name"],
+            z=data_rows["metric_value"],
+            zmin=zmin,
+            zmax=zmax,
+            colorscale=colorscale,
+            colorbar=dict(title=colorbar_title, tickformat=tickformat),
+            marker=dict(line=dict(color="#fffdf8", width=1.0)),
+            selectedpoints=selectedpoints,
+            selected=dict(marker=dict(opacity=1.0)),
+            unselected=dict(marker=dict(opacity=0.62)),
+            customdata=data_rows[
+                [
+                    "shape_name",
+                    "dataset_label",
+                    "has_dataset_match",
+                    "metric_display",
+                    "reference_label",
+                ]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Dataset region: %{customdata[1]}<br>"
+                f"{metric_label}: "
+                "%{customdata[3]}<br>"
+                "Reference: %{customdata[4]}<extra></extra>"
+            ),
+            name=metric_label,
+        )
+    )
+
+    selected_shape = map_df.loc[
+        map_df["oblast_name"].eq(selected_oblast), "shape_name"
+    ].head(1)
+    if not selected_shape.empty:
+        figure.add_trace(
+            go.Choropleth(
+                geojson=geojson,
+                featureidkey="properties.shapeName",
+                locations=selected_shape,
+                z=[0],
+                zmin=0,
+                zmax=1,
+                colorscale=[
+                    [0, "rgba(0,0,0,0)"],
+                    [1, "rgba(0,0,0,0)"],
+                ],
+                showscale=False,
+                marker=dict(line=dict(color=TEXT_DARK, width=3.0)),
+                hoverinfo="skip",
+                name="Selected region",
+            )
+        )
+
+    figure.update_geos(
+        visible=False,
+        projection_type="mercator",
+        lonaxis_range=[21.5, 41.5],
+        lataxis_range=[44.0, 53.0],
+        bgcolor="#fffdf8",
+    )
+    figure.update_layout(
+        title=dict(
+            text=(
+                f"Ukraine oblast selector: {metric_label}<br>"
+                f"<sup>{reference_label}. Click an oblast to update the dashboard.</sup>"
+            ),
+            x=0.02,
+            xanchor="left",
+            font=dict(size=18, color=TEXT_DARK),
+        ),
+        height=540,
+        margin=dict(l=0, r=0, t=72, b=0),
+        paper_bgcolor="#fffdf8",
+        plot_bgcolor="#fffdf8",
+        font=dict(family="Arial, sans-serif", color=TEXT_DARK),
+        clickmode="event+select",
+        dragmode=False,
+    )
+    return figure
+
+
+def extract_oblast_from_map_event(map_event: object) -> tuple[str | None, str | None]:
+    if map_event is None:
+        return None, None
+
+    selection = None
+    if hasattr(map_event, "get"):
+        selection = map_event.get("selection")
+    else:
+        selection = getattr(map_event, "selection", None)
+    if selection is None:
+        return None, None
+
+    if hasattr(selection, "get"):
+        points = selection.get("points", [])
+    else:
+        points = getattr(selection, "points", [])
+    if not points:
+        return None, None
+
+    customdata = points[0].get("customdata") or []
+    shape_name = str(customdata[0]) if len(customdata) > 0 else "Selected region"
+    dataset_oblast = customdata[1] if len(customdata) > 1 else None
+    has_dataset_match = customdata[2] if len(customdata) > 2 else False
+    has_dataset_match = str(has_dataset_match).lower() not in {
+        "",
+        "0",
+        "false",
+        "nan",
+        "none",
+    }
+
+    if not has_dataset_match or not dataset_oblast or pd.isna(dataset_oblast):
+        return None, f"{shape_name} is shown on the map, but this dataset has no alert records for it."
+    return str(dataset_oblast), None
+
+
+def render_oblast_map(
+    daily: pd.DataFrame,
+    forecast: pd.DataFrame,
+    metric: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    selected_oblast: str,
+) -> None:
+    geojson = load_ukraine_geojson()
+    map_df, reference_label = build_map_metric_table(
+        daily=daily,
+        forecast=forecast,
+        geojson=geojson,
+        metric=metric,
+        start=start,
+        end=end,
+    )
+    map_figure = build_oblast_map_figure(
+        map_df=map_df,
+        geojson=geojson,
+        metric=metric,
+        selected_oblast=selected_oblast,
+        reference_label=reference_label,
+    )
+
+    st.markdown(
+        f"""
+        <div class="map-panel">
+          <div class="map-panel-title">
+            <strong>Interactive oblast map</strong>
+            <span>{METRIC_OPTIONS[metric]}</span>
+          </div>
+          <div class="selected-region-pill">Selected: {selected_oblast}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    map_event = st.plotly_chart(
+        map_figure,
+        key="oblast_map",
+        on_select="rerun",
+        selection_mode="points",
+        theme=None,
+        config={"displaylogo": False, "scrollZoom": False},
+        width="stretch",
+        height=560,
+    )
+
+    clicked_oblast, notice = extract_oblast_from_map_event(map_event)
+    if clicked_oblast and clicked_oblast != st.session_state.get("selected_oblast"):
+        st.session_state["selected_oblast"] = clicked_oblast
+        st.session_state.pop("map_notice", None)
+        st.rerun()
+    if notice:
+        st.session_state["map_notice"] = notice
+    if st.session_state.get("map_notice"):
+        st.info(st.session_state["map_notice"])
+    st.caption(GEOBOUNDARIES_ATTRIBUTION)
 
 
 def most_active_day(filtered_daily: pd.DataFrame) -> str:
@@ -726,14 +1146,11 @@ def main() -> None:
     max_date = daily["date"].max().date()
     oblasts = sorted(daily["oblast_name"].dropna().unique())
     default_oblast = "Kyivska oblast" if "Kyivska oblast" in oblasts else oblasts[0]
+    if st.session_state.get("selected_oblast") not in oblasts:
+        st.session_state["selected_oblast"] = default_oblast
 
     with st.sidebar:
         st.header("Filters")
-        selected_oblast = st.selectbox(
-            "Oblast",
-            oblasts,
-            index=oblasts.index(default_oblast),
-        )
         selected_range = st.date_input(
             "Date range",
             value=(min_date, max_date),
@@ -745,11 +1162,23 @@ def main() -> None:
             options=list(METRIC_OPTIONS.keys()),
             format_func=METRIC_OPTIONS.get,
         )
+        with st.expander("Fallback region selector / debug"):
+            fallback_oblast = st.selectbox(
+                "Oblast",
+                oblasts,
+                index=oblasts.index(st.session_state["selected_oblast"]),
+            )
+            if fallback_oblast != st.session_state["selected_oblast"]:
+                st.session_state["selected_oblast"] = fallback_oblast
+                st.session_state.pop("map_notice", None)
+                st.rerun()
+            st.caption(GEOBOUNDARIES_ATTRIBUTION)
 
     start_date, end_date = normalize_date_range(selected_range, min_date, max_date)
     if start_date > end_date:
         start_date, end_date = end_date, start_date
 
+    selected_oblast = st.session_state["selected_oblast"]
     filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
     filtered_events = filter_event_level(events, selected_oblast, start_date, end_date)
     risk, risk_date = latest_future_risk(forecast, selected_oblast)
@@ -764,6 +1193,19 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    render_oblast_map(
+        daily=daily,
+        forecast=forecast,
+        metric=metric,
+        start=start_date,
+        end=end_date,
+        selected_oblast=selected_oblast,
+    )
+    selected_oblast = st.session_state["selected_oblast"]
+    filtered_daily = filter_daily(daily, selected_oblast, start_date, end_date)
+    filtered_events = filter_event_level(events, selected_oblast, start_date, end_date)
+    risk, risk_date = latest_future_risk(forecast, selected_oblast)
 
     if filtered_daily.empty:
         st.warning("No daily records found for this oblast and date range.")
