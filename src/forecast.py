@@ -1102,30 +1102,12 @@ def forecast_from_truncated_history(
     *,
     origin_date: pd.Timestamp,
     horizon: int,
-    requested_models: list[str],
 ) -> pd.DataFrame:
     truncated = history[history["date"].le(origin_date)].copy()
     if truncated.empty:
         return pd.DataFrame()
     future = future_forecast_frame(truncated, event_calendar, horizon=horizon)
-    
-    frames: list[pd.DataFrame] = []
-    if "baselines" in requested_models:
-        frames.append(build_baseline_forecast_60d(truncated, future))
-        
-    if "lstm" in requested_models:
-        lstm_predictions, _ = try_build_lstm_forecast_60d(
-            truncated,
-            future,
-            horizon=horizon,
-            lookback_days=DEFAULT_LOOKBACK_DAYS,
-        )
-        if lstm_predictions is not None and not lstm_predictions.empty:
-            frames.append(lstm_predictions)
-            
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return build_baseline_forecast_60d(truncated, future)
 
 
 def evaluate_forecast_60d_predictions(
@@ -1186,13 +1168,12 @@ def evaluate_forecast_60d_predictions(
     return metrics
 
 
-def run_backtests(
+def run_baseline_backtests(
     history: pd.DataFrame,
     event_calendar: pd.DataFrame | None,
     *,
     horizon: int,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    requested_models: list[str],
 ) -> dict[str, Any]:
     origins = choose_backtest_origins(
         history,
@@ -1213,7 +1194,6 @@ def run_backtests(
             event_calendar,
             origin_date=origin,
             horizon=horizon,
-            requested_models=requested_models,
         )
         if forecast_frame.empty:
             continue
@@ -1281,12 +1261,11 @@ def run_forecast_60d(
         ["model_name", "forecast_date", "oblast_name"]
     )
 
-    validation = run_backtests(
+    validation = run_baseline_backtests(
         history,
         event_calendar,
         horizon=horizon,
         lookback_days=lookback_days,
-        requested_models=requested_models,
     )
     metrics = {
         "framing": (
@@ -1302,7 +1281,7 @@ def run_forecast_60d(
         "future_date_min": predictions["forecast_date"].min().date().isoformat(),
         "future_date_max": predictions["forecast_date"].max().date().isoformat(),
         "milestone_days": MILESTONE_DAYS,
-        "backtests": validation,
+        "baseline_backtests": validation,
         "lstm": lstm_metadata,
     }
 
@@ -1329,7 +1308,7 @@ def print_forecast_60d_summary(result: Forecast60DResult) -> None:
     print(f"Rows: {len(result.predictions):,}")
     print("Models: " + ", ".join(result.metrics["generated_models"]))
     print("\nMilestone backtests")
-    metrics_by_model = result.metrics.get("backtests", {}).get("metrics_by_model", {})
+    metrics_by_model = result.metrics.get("baseline_backtests", {}).get("metrics_by_model", {})
     if not metrics_by_model:
         print("- No rolling backtests available.")
     for model_name, horizon_metrics in metrics_by_model.items():
