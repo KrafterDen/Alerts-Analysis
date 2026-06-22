@@ -195,6 +195,36 @@ ALERTS_IN_UA_TOKEN=your_token_here
 
 The token is needed for API exploration and recent delta ingestion. The long-term historical baseline comes from the public GitHub dataset.
 
+## Running Without An API Token
+
+The dashboard can be launched **without** an `ALERTS_IN_UA_TOKEN` if the prepared data files are already present in `data/processed/`.
+
+For jury review, this is the recommended no-token path:
+
+```powershell
+pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+This allows reviewing the implemented dashboard, historical analysis, holiday/symbolic-date timeline, and 60-day forecast UI using the already prepared processed datasets.
+
+What works without the token:
+
+- Streamlit dashboard in `app.py`;
+- interactive oblast map;
+- historical tabs and tables;
+- holiday/symbolic-date timeline;
+- baseline and generated forecast views from `data/processed/forecast_60d_oblast.csv`;
+- static outputs in `outputs/`.
+
+What requires the token:
+
+- alerts.in.ua API smoke test;
+- recent API delta ingestion;
+- fully rebuilding the freshest API-backed data layer.
+
+Historical GitHub ingestion does not require the alerts.in.ua token, but a fully fresh hybrid rebuild is best done with the token available.
+
 ## Running The Pipeline
 
 Typical execution order:
